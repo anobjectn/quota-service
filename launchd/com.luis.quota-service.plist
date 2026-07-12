@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  quota-service launchd agent.
+
+  DO NOT LOAD THIS YET. Keychain access (the Anthropic collector) needs a
+  first-run interactive prompt from Finder/Terminal with Luis present to
+  grant "always allow" to the launching binary; a launchd job runs headless
+  and will silently fail that prompt. Load it manually once you've confirmed
+  a foreground `bun run serve` session has already been granted keychain
+  access (see HOW-TO-USE.md for the install steps).
+
+  Adjust WorkingDirectory / paths if the repo or bun binary location changes.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.luis.quota-service</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/bun</string>
+    <string>run</string>
+    <string>/Users/luis/htdocs/quota-service/src/server.ts</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/luis/htdocs/quota-service</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>QUOTA_PORT</key>
+    <string>8787</string>
+    <key>QUOTA_POLL_MS</key>
+    <string>300000</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/luis/.quota-service/quota-service.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/luis/.quota-service/quota-service.err.log</string>
+</dict>
+</plist>
