@@ -1,9 +1,11 @@
 # quota-service — HOW TO USE
 
 Personal, local-first usage/quota tracker for Codex (ChatGPT Plus), Anthropic
-(Claude Code Pro), and Warp. Phases 1–3 of Plan B are built: SQLite store,
-collectors for all three providers, `quota` CLI, a small HTTP server, and a
-stdio MCP server registered in both Codex and Claude Code.
+(Claude Code Pro), and Warp. Phases 1–5 of Plan B are built: SQLite store,
+collectors for all three providers, `quota` CLI, a small HTTP server, a stdio
+MCP server registered in both Codex and Claude Code, task-profile cost
+estimation + model recommendation, and a web dashboard. Phase 6 (agent status
+feed) is stretch and not built — see "Status feed (Phase 6, not built)" below.
 
 Everything here is **read-only** against provider systems: no collector ever
 calls a consume/purchase/POST endpoint. Every provider result carries an
@@ -28,7 +30,16 @@ bin/quota            # human table, all three providers
 bin/quota json        # same data, machine-readable
 bin/quota resets       # natural reset countdowns + Codex banked reset credits
 bin/quota resets json
+bin/quota estimate feature       # token-range estimate for a task profile
+bin/quota estimate feature json
+bin/quota recommend large_refactor    # ranked model/provider suggestion given live headroom
+bin/quota recommend large_refactor json
 ```
+
+Task profiles: `small_fix`, `feature`, `large_refactor`, `research` (defaults
+to `feature` if omitted or unrecognized). These map onto the
+`plan-review-execute` skill's `model-rubric.md` tiering (light/mid/frontier)
+so both tools speak the same vocabulary.
 
 Sample real output (captured while building this):
 
@@ -68,7 +79,10 @@ bun run serve --poll-ms 60000   # poll more/less often (per-provider floors stil
 bun run serve --host <tailnet-ip-or-hostname>   # expose beyond localhost, e.g. on your tailnet
 ```
 
-Routes: `GET /usage`, `GET /resets`, `GET /status`.
+Routes: `GET /usage`, `GET /resets`, `GET /status`, `GET /estimate[?taskProfile=...]`,
+`GET /recommend[?taskProfile=...]`, `POST /manual` (body:
+`{provider, field, value, note?}`), and the dashboard itself at `GET /`
+(static files served from `public/`).
 
 `bin/quota` / `bin/quota json` try the server first (`http://127.0.0.1:8787/usage`)
 and fall back to a direct one-shot collection if it's not running — so the
@@ -148,7 +162,75 @@ complete programmatic collectors.
   — for live API tactics those are the same; for Codex's file fallback and
   Warp's plist, age reflects when that data was actually produced.
 
-## MCP server (Phase 3)
+## Web dashboard (Phase 5)
+
+```bash
+bun run serve                                    # dashboard at http://127.0.0.1:8787/
+bun run serve --host <tailnet-ip-or-hostname>     # same flag as always, now also serves the dashboard there
+```
+
+Dark-mode "instrument panel" SPA (`public/index.html` + `styles.css` +
+`app.js`, plain JS, no framework, no build step — Bun serves it as static
+files off the same server as the API). It reads `GET /usage` and re-polls
+every 30s client-side:
+
+- **Provider cards**: Codex and Anthropic get two radial arc gauges (5h,
+  weekly) with a reset countdown; Warp gets a linear pool bar (used/limit +
+  refresh countdown) since it has no window semantics. Every card shows a
+  data-freshness pill (`OK`/`STALE`/`UNAVAILABLE`), source, and data age.
+- **Estimate & recommend panel**: click a task-profile chip
+  (`small_fix`/`feature`/`large_refactor`/`research`) to get a live
+  `recommend_model`-equivalent call against `GET /recommend` — shows the
+  picked provider/model, the one-line reason, the token-range estimate, and
+  alternates.
+- **Manual entry form**: same mechanism as `bin/quota manual set` (posts to
+  `POST /manual`) — use it instead of the CLI to record Warp add-on credits
+  from the dashboard.
+- **Purchase/manage links**: static outbound links per provider (Codex →
+  ChatGPT subscription settings, Anthropic → claude.ai billing, Warp →
+  `warp://settings/billing`). Links only — nothing here ever calls a
+  purchase/consume endpoint. Verify these still resolve if a provider
+  reshuffles their settings UI; they were not exhaustively checked against
+  every account state.
+- **Status feed panel**: present but inert — see "Status feed (Phase 6, not
+  built)" below.
+- No auth beyond network-level (tailnet), matching Plan B's default. Dark mode
+  is the only mode (no light theme built).
+
+Colors: the four fixed status colors (`ok`/`stale`/`unavailable` badges, and
+the usage-magnitude ring/bar tint) come from the `dataviz` skill's validated
+status palette, checked against this app's dark surface. Typography: Fraunces
+(display) + JetBrains Mono (data/labels/UI chrome).
+
+**Verified live** (this session): `curl` against `/`, `/styles.css`, `/app.js`
+all returned 200 with real content; `/usage`, `/estimate`, `/recommend` all
+returned real live data; `POST /manual` round-tripped a real write/read; a
+browser preview tool loaded the page and rendered real provider cards with
+correct gauge values, colors, and an overall status banner reflecting Warp's
+pool being fully used. **Final visual approval is still Luis's call** — no
+automated test can approve "pretty."
+
+## Status feed (Phase 6, not built)
+
+Explicitly stretch scope; time-boxed out after Phases 4–5 to avoid blocking
+their sign-off. Designed-but-not-built shape, for whoever picks this up:
+
+- MCP tools `post_status(harness, task, message)` / `get_status_feed(limit?)`,
+  mirrored as REST `POST /status-feed` / `GET /status-feed`, and a `quota
+  status post` / `quota status feed` CLI form — following the same pattern as
+  `get_usage`/`get_resets`.
+- New SQLite table `status_feed (id, harness, task, message, posted_at)`,
+  append-only like `snapshots`.
+- Dashboard: a "status feed" panel already exists in `public/index.html`
+  (currently just an explanatory placeholder) — replace its contents with a
+  newest-first list, each row showing a harness chip, the message, and a
+  relative timestamp; poll `GET /status-feed` on the same 30s interval as
+  `/usage`.
+- Purpose (from the plan doc): the dashboard doubles as cross-harness mission
+  control — agents in Codex/Claude Code/T3C/Warp `post_status` a short
+  progress string, so the feed becomes the "what's running where" view.
+
+## MCP server (Phase 3, extended in Phase 4)
 
 `src/mcp.ts` is a stdio MCP server exposing:
 
@@ -157,9 +239,17 @@ complete programmatic collectors.
 - `get_resets` — natural 5h/weekly/pool reset times plus Codex's banked reset
   credits (`available_count`, `total_earned_count`, each credit's status and
   expiry). Report-only, as above.
-- `estimate_cost`, `recommend_model` — Phase 4 stubs. Both return
-  `{ implemented: false, message: "... not implemented until Plan B Phase 4 ..." }`
-  so callers can wire up the interface now without erroring.
+- `estimate_cost({ taskProfile? })` — v1.5 heuristic token-range estimate
+  (see `src/estimation.ts` for the full calibration-provenance comment).
+  Returns real structured data, no longer a stub.
+- `recommend_model({ taskProfile? })` — combines that estimate with live
+  `get_usage` headroom across all three providers and returns a ranked
+  provider+model suggestion with a one-line reason, alternates, and explicit
+  warnings for any stale/unavailable provider (never silently dropped).
+  Returns real structured data, no longer a stub. This is the tool the
+  `plan-review-execute` skill's pre-flight gate was waiting on — once this
+  shipped, the gate's `{ implemented: false }` fallback path stops
+  triggering automatically (no changes needed on that skill's side).
 
 ### Registration
 
@@ -242,15 +332,19 @@ surfaces inside a live Codex session, a live Claude Code session, and a T3
 Code thread of each — this cannot be exercised from inside this build
 session.
 
-## Launchd (written, NOT loaded)
+## Launchd (loaded and running as of Phase 4–6)
 
 `launchd/com.luis.quota-service.plist` runs `bun run src/server.ts` at load
-and keeps it alive, polling every 5 minutes on port 8787. **It is not loaded.**
-The Anthropic collector's first Keychain read from a new binary triggers a
-one-time interactive "always allow" prompt — launchd runs headless and can't
-answer that prompt, so it would silently fail. Install it only after you've
-run `bun run serve` in the foreground at least once and confirmed the
-Keychain prompt (if any appears) was granted:
+and keeps it alive, polling every 5 minutes on port 8787. **It is loaded** —
+found running (uptime ~10.7h) at the start of this Phase 4–6 session, so it
+was installed sometime after the Phase 1–3 handoff was written (that handoff
+still says "not loaded"; this note supersedes it). It picked up the new
+Phase 4/5 code automatically on restart during this session's testing (kill +
+launchd's `KeepAlive` respawns it; no reinstall needed for code changes).
+Reference, if it's ever uninstalled and needs reinstalling — the Anthropic
+collector's first Keychain read from a new binary triggers a one-time
+interactive "always allow" prompt, which launchd can't answer headless, so
+install it only after a foreground run has confirmed that prompt was granted:
 
 ```bash
 # 1. Run foreground first, confirm Anthropic isn't stuck on a keychain denial:
@@ -289,3 +383,23 @@ Logs land at `~/.quota-service/quota-service.{out,err}.log`.
   above.
 - Nothing was left in a stale/unavailable state due to being blocked — all
   three collectors are live and returning `[OK]` as of this writing.
+- **Estimation calibration is v1.5, not full v2** — `src/estimation.ts`'s
+  token-range bounds were sanity-checked against real per-session token
+  totals from 119 Claude Code transcripts
+  (`~/.claude/projects/**/*.jsonl`, one-off analysis, 2026-07-13:
+  p10=20,507 p25=25,950 p50=73,399 p75=120,258 p90=229,201 p95=293,455
+  max=761,626), but the task-profile *labels*
+  (`small_fix`/`feature`/`large_refactor`/`research`) are still hand-assigned
+  — the transcripts carry no ground-truth task-type field. Codex equivalents
+  (`~/.codex/sessions/**/*.jsonl`) were not cross-referenced (different token-
+  accounting shape; the Codex collector at `src/collectors/codex.ts` already
+  knows how to tail these and would be the natural place to reuse that
+  parsing). Full methodology and the real-v2 TODO are in a comment block at
+  the top of `src/estimation.ts`.
+- **Purchase/manage links on the dashboard are best-effort**, not
+  exhaustively verified against every account state — see the "Web dashboard"
+  section above.
+- **Dashboard visual approval is still pending** — built to the "pretty is a
+  requirement" bar using the `frontend-design` and `dataviz` skills, verified
+  functionally (real data renders correctly, live-tested in a browser
+  preview), but only Luis can sign off on "pretty."

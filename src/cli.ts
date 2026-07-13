@@ -11,6 +11,7 @@ import {
   type UsageReport,
 } from "./present";
 import type { Provider } from "./types";
+import { estimateCost, isValidTaskProfile, recommendModel, TASK_PROFILES, type TaskProfile } from "./estimation";
 
 const HTTP_DEFAULT_PORT = Number(process.env.QUOTA_PORT ?? 8787);
 
@@ -165,6 +166,67 @@ function cmdManualSet(args: string[]): void {
   console.log(`set ${provider}.${field} = ${value}`);
 }
 
+function parseTaskProfile(args: string[]): TaskProfile {
+  const raw = args[0];
+  if (isValidTaskProfile(raw)) return raw;
+  if (raw) {
+    console.error(`unknown task profile "${raw}" — expected one of: ${TASK_PROFILES.join(", ")}. Defaulting to "feature".`);
+  }
+  return "feature";
+}
+
+function cmdEstimate(args: string[]): void {
+  const json = args.includes("json");
+  const profile = parseTaskProfile(args.filter((a) => a !== "json"));
+  const result = estimateCost(profile);
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(`estimate — ${profile}: ${result.description}`);
+  console.log(`  rubric tier: ${result.rubricTier}`);
+  for (const tier of ["light", "mid", "frontier"] as const) {
+    const r = result.tokenRangeByTier[tier];
+    console.log(`  ${pad(tier, 10)} ${r.low.toLocaleString()} – ${r.high.toLocaleString()} tokens (typical ~${r.typical.toLocaleString()})`);
+  }
+  console.log(`  calibration: ${result.calibration.note}`);
+}
+
+async function cmdRecommend(args: string[]): Promise<void> {
+  const json = args.includes("json");
+  const profile = parseTaskProfile(args.filter((a) => a !== "json"));
+  const serverReport = await tryServer("/usage");
+  let usage: UsageReport;
+  if (serverReport) {
+    usage = serverReport as UsageReport;
+  } else {
+    const db = openDb();
+    await collectAll(db);
+    usage = buildUsageReport(db);
+  }
+  const result = recommendModel(profile, usage);
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(`recommend — ${profile} (rubric tier: ${result.estimate.rubricTier})`);
+  if (result.recommendation) {
+    console.log(`  -> ${result.recommendation.provider} / ${result.recommendation.model}`);
+  } else {
+    console.log(`  -> no usable recommendation`);
+  }
+  console.log(`  reason: ${result.reason}`);
+  if (result.alternates.length > 0) {
+    console.log(`  alternates:`);
+    for (const alt of result.alternates) {
+      console.log(`    - ${alt.provider} / ${alt.model} (headroom: ${alt.headroomPercent != null ? alt.headroomPercent.toFixed(1) + "%" : "unknown"})`);
+    }
+  }
+  for (const w of result.warnings) {
+    console.log(`  warning: ${w}`);
+  }
+}
+
 function printHelp(): void {
   console.log(`quota — personal usage/quota CLI
 
@@ -175,6 +237,11 @@ Usage:
   quota resets json      machine-readable resets report
   quota manual set <provider> <field> <value> [note...]
                           record a manual entry (e.g. Warp add-on credits)
+  quota estimate [profile] [json]
+                          token-range estimate for a task profile
+                          (small_fix | feature | large_refactor | research)
+  quota recommend [profile] [json]
+                          ranked model/provider suggestion given live headroom
   quota help              this message
 
 Notes:
@@ -197,6 +264,10 @@ async function main(): Promise<void> {
     await cmdResets(rest[0] === "json");
   } else if (cmd === "manual" && rest[0] === "set") {
     cmdManualSet(rest.slice(1));
+  } else if (cmd === "estimate") {
+    cmdEstimate(rest);
+  } else if (cmd === "recommend") {
+    await cmdRecommend(rest);
   } else if (cmd === "help" || cmd === "--help" || cmd === "-h") {
     printHelp();
   } else {

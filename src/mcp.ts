@@ -14,6 +14,7 @@ import { z } from "zod";
 import { openDb } from "./db";
 import { collectAll } from "./collect";
 import { buildResetsReport, buildUsageReport } from "./present";
+import { TASK_PROFILES, estimateCost, isValidTaskProfile, recommendModel, type TaskProfile } from "./estimation";
 
 const db = openDb();
 
@@ -56,41 +57,55 @@ server.registerTool(
   },
 );
 
-const NOT_IMPLEMENTED = (tool: string) => ({
-  content: [
-    {
-      type: "text" as const,
-      text: JSON.stringify(
-        {
-          tool,
-          implemented: false,
-          message: `${tool} is not implemented until Plan B Phase 4 (token/cost estimation). This is a stub so callers can wire up the interface now.`,
-        },
-        null,
-        2,
-      ),
-    },
-  ],
-});
+const TASK_PROFILE_ENUM = TASK_PROFILES as [TaskProfile, ...TaskProfile[]];
+
+function resolveTaskProfile(taskProfile: string | undefined): TaskProfile {
+  if (isValidTaskProfile(taskProfile)) return taskProfile;
+  // Default when the caller doesn't (or can't) classify: "feature" is the
+  // most common mid-complexity case, matching model-rubric.md's mid tier.
+  return "feature";
+}
 
 server.registerTool(
   "estimate_cost",
   {
-    title: "Estimate token/cost for a task (stub)",
-    description: "Phase 4 stub. Not implemented yet — returns a clear not-implemented payload.",
-    inputSchema: { taskDescription: z.string().optional() },
+    title: "Estimate token/cost for a task",
+    description:
+      "v1.5 heuristic token-range estimate for a task profile (small_fix/feature/large_refactor/research) across light/mid/frontier model tiers. Coarse by design — precise pre-estimation is impossible; see calibration notes in the response.",
+    inputSchema: {
+      taskProfile: z
+        .enum(TASK_PROFILE_ENUM)
+        .optional()
+        .describe("small_fix | feature | large_refactor | research. Defaults to 'feature' if omitted."),
+    },
   },
-  async () => NOT_IMPLEMENTED("estimate_cost"),
+  async ({ taskProfile }) => {
+    const profile = resolveTaskProfile(taskProfile);
+    const result = estimateCost(profile);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  },
 );
 
 server.registerTool(
   "recommend_model",
   {
-    title: "Recommend a model/provider given headroom (stub)",
-    description: "Phase 4 stub. Not implemented yet — returns a clear not-implemented payload.",
-    inputSchema: { taskProfile: z.string().optional() },
+    title: "Recommend a model/provider given live headroom",
+    description:
+      "Combines the task-profile token estimate with live get_usage headroom across Codex/Anthropic/Warp and returns a ranked provider+model suggestion with a one-line reason. Never silently drops a stale/unavailable provider — it's flagged in the response instead.",
+    inputSchema: {
+      taskProfile: z
+        .enum(TASK_PROFILE_ENUM)
+        .optional()
+        .describe("small_fix | feature | large_refactor | research. Defaults to 'feature' if omitted."),
+    },
   },
-  async () => NOT_IMPLEMENTED("recommend_model"),
+  async ({ taskProfile }) => {
+    await collectAll(db).catch(() => undefined);
+    const profile = resolveTaskProfile(taskProfile);
+    const usage = buildUsageReport(db);
+    const result = recommendModel(profile, usage);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  },
 );
 
 const transport = new StdioServerTransport();
