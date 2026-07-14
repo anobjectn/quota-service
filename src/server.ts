@@ -32,22 +32,38 @@ function parseArgs(argv: string[]): { host: string; port: number; pollMs: number
 const { host, port, pollMs } = parseArgs(process.argv.slice(2));
 const db = openDb();
 
-async function pollLoop(): Promise<void> {
-  while (true) {
-    try {
-      await collectAll(db);
-    } catch (err) {
-      console.error("[quota-service] collection error:", err instanceof Error ? err.message : err);
-    }
-    await Bun.sleep(pollMs);
+// Self-rescheduling setTimeout rather than a bare interval/while+sleep loop:
+// each cycle only schedules the *next* cycle once this one has settled (via
+// the finally below), so a hang anywhere inside can't pile up overlapping
+// runs, and a watchdog timeout guarantees the schedule keeps moving even if
+// collectAll() itself never resolves (the observed Jul 13 wedge — a fetch()
+// with no deadline stalled after the Mac woke from sleep, and the old
+// `while (true) { await collectAll(db); await Bun.sleep(pollMs) }` loop
+// blocked on that await forever, so no further snapshots were ever written
+// even though the process itself stayed up under launchd/KeepAlive).
+const POLL_WATCHDOG_MS = 30_000;
+
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function runPollCycle(): Promise<void> {
+  try {
+    await Promise.race([
+      collectAll(db),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("collectAll watchdog timeout")), POLL_WATCHDOG_MS);
+      }),
+    ]);
+  } catch (err) {
+    // Catch-all: one bad cycle (network hiccup, watchdog trip, anything)
+    // must never stop the schedule.
+    console.error("[quota-service] collection error:", err instanceof Error ? err.message : err);
+  } finally {
+    pollTimer = setTimeout(() => void runPollCycle(), pollMs);
   }
 }
 
 // Kick off an immediate collection so /usage has data right away, then poll.
-void collectAll(db).catch((err) => {
-  console.error("[quota-service] initial collection error:", err instanceof Error ? err.message : err);
-});
-void pollLoop();
+void runPollCycle();
 
 const PUBLIC_DIR = join(import.meta.dir, "..", "public");
 
@@ -70,9 +86,16 @@ const server = Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
     if (url.pathname === "/usage") {
+      // Collect-on-query: collectAll() only actually re-hits the network for
+      // providers whose data has aged past their poll floor (see collect.ts);
+      // otherwise this is just a cached-row read, so it's cheap on the
+      // common path and only pays the network cost when the background poll
+      // loop has genuinely fallen behind.
+      await collectAll(db).catch(() => undefined);
       return Response.json(buildUsageReport(db));
     }
     if (url.pathname === "/resets") {
+      await collectAll(db).catch(() => undefined);
       return Response.json(buildResetsReport(db));
     }
     if (url.pathname === "/status") {
@@ -84,6 +107,7 @@ const server = Bun.serve({
       return Response.json(estimateCost(profile));
     }
     if (url.pathname === "/recommend") {
+      await collectAll(db).catch(() => undefined);
       const raw = taskProfileParam(url);
       const profile = isValidTaskProfile(raw) ? raw : "feature";
       const usage = buildUsageReport(db);

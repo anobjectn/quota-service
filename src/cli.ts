@@ -17,8 +17,11 @@ const HTTP_DEFAULT_PORT = Number(process.env.QUOTA_PORT ?? 8787);
 
 async function tryServer(path: string): Promise<unknown | null> {
   try {
+    // Generous timeout: the server does collect-on-query on these routes
+    // (re-collects any provider whose data has aged past its poll floor)
+    // before responding, which can take a few seconds on a cold provider.
     const res = await fetch(`http://127.0.0.1:${HTTP_DEFAULT_PORT}${path}`, {
-      signal: AbortSignal.timeout(1500),
+      signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) return null;
     return await res.json();
@@ -55,6 +58,21 @@ function renderProviderLine(p: ProviderReport): string[] {
       );
     } else {
       lines.push(`  weekly window: not currently tracked`);
+    }
+    // Per-model windows (e.g. Anthropic's Fable bucket) — indented under the
+    // provider, and simply absent when the provider reports none.
+    const modelWindows = p.snapshot.modelWindows;
+    if (modelWindows && Object.keys(modelWindows).length > 0) {
+      for (const [name, w] of Object.entries(modelWindows)) {
+        lines.push(`    ${name} weekly:  ${w.usedPercent.toFixed(1)}%  resets ${formatCountdown(w.resetsAt)}`);
+      }
+    }
+    const credits = p.snapshot.usageCredits;
+    if (credits) {
+      const badge = credits.enabled ? "enabled" : "disabled";
+      const limitStr = credits.limitAmount != null ? credits.limitAmount.toFixed(2) : "?";
+      const resetStr = credits.resetsAt != null ? `  resets ${formatCountdown(credits.resetsAt)}` : "";
+      lines.push(`  usage credits: [${badge}] $${credits.spentAmount.toFixed(2)} / $${limitStr} ${credits.currency}${resetStr}`);
     }
     const extra = p.snapshot.extra as Record<string, unknown> | undefined;
     if (extra?.planType) lines.push(`  plan: ${extra.planType}`);
@@ -224,6 +242,9 @@ async function cmdRecommend(args: string[]): Promise<void> {
   }
   for (const w of result.warnings) {
     console.log(`  warning: ${w}`);
+  }
+  if (result.usageCreditsNote) {
+    console.log(`  fallback: ${result.usageCreditsNote}`);
   }
 }
 

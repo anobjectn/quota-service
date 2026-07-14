@@ -131,6 +131,37 @@ or names. This is more robust to the account-state variation observed live.
   some Claude Code installs) instead of `claudeAiOauth`, the collector
   reports it as an `unavailable` config error rather than crashing.
 
+### Per-model weekly windows and usage credits (plan-dependent)
+
+The `oauth/usage` response carries a generic `limits[]` array alongside the
+`five_hour`/`seven_day` fields. Anthropic uses this array for **per-model**
+weekly windows — currently a temporary "Fable" bucket (Claude Fable 5 /
+Opus 4.8's shared 7-day window, separate from the "all models" weekly
+window, both resetting Wed 4:00am) — and this service parses it generically
+rather than hardcoding a "Fable" field: any `limits[]` entry with a
+`scope.model.display_name` becomes a `snapshot.modelWindows[<name>]` entry
+(`{ usedPercent, resetsAt }`). **This is plan-dependent and vanishes
+gracefully**: when a per-model bucket disappears from the API response (e.g.
+the temporary Fable window's ~1-week expiry), `modelWindows` for that key
+just stops appearing — no schema change, no crash, and the CLI/dashboard
+simply stop rendering that row.
+
+Usage credits are similarly first-class: `snapshot.usageCredits` is
+`{ enabled, spentAmount, limitAmount, currency, resetsAt }` in major currency
+units (already converted from the API's minor-unit `amount_minor` +
+`exponent`). The collector prefers the newer `spend` block and falls back to
+the legacy `extra_usage` block if `spend` is absent. This is a manual-style
+**fallback balance**, exactly like Warp's add-on credits — `recommend_model`
+surfaces it as a flagged note (`usageCreditsNote`) when enabled with a
+remaining balance, but never factors it into automated ranking or spending.
+
+`recommend_model`'s binding-constraint logic treats Anthropic's frontier tier
+(Fable 5) specially: the binding bucket is whichever of 5h / all-models
+weekly / any present per-model window has the least headroom, and the
+`reason` string names it (e.g. `"...on its Fable weekly window"` or
+`"...on its 5h window"`). A fresh per-model bucket can make the frontier tier
+cheaper to recommend even when the all-models weekly window is tight.
+
 ### Warp: manual entry for add-on credits
 
 Warp's `AIRequestLimitInfo` plist key has no field for purchased add-on
@@ -162,6 +193,64 @@ complete programmatic collectors.
   — for live API tactics those are the same; for Codex's file fallback and
   Warp's plist, age reflects when that data was actually produced.
 
+### Reliability: collect-on-query, the stale-status rule, and the Jul 13 wedge
+
+**What happened (root cause):** the launchd service stayed up (`RunAtLoad` +
+`KeepAlive` kept the process alive under launchd's eyes) but its SQLite WAL
+stopped advancing after the Mac slept overnight. The old poll loop was
+`while (true) { await collectAll(db); await Bun.sleep(pollMs) }`, and none of
+the three collectors' `fetch()` calls (Anthropic `oauth/usage`, Codex
+`wham/usage`, Codex `rate-limit-reset-credits`) had a request timeout. Bun's
+`fetch()` can stall indefinitely on a socket left half-open across a sleep/
+wake cycle instead of erroring, so the `await collectAll(db)` in that loop
+never returned, `Bun.sleep` never ran, and no further snapshots were ever
+written — while the process itself looked perfectly healthy to launchd. Every
+subsequent `GET /usage` kept serving the last-known row with status `"ok"`,
+because nothing checked the row's age against how it was collected.
+
+**The fix has three parts, all independent of nailing down 100% certainty on
+the root cause above:**
+
+1. **Fetch timeouts.** Every collector network call now passes
+   `signal: AbortSignal.timeout(10_000)`, so a stalled socket fails fast
+   instead of hanging forever.
+2. **Self-rescheduling poll loop with a watchdog.** `src/server.ts`'s poll
+   loop is a `setTimeout`-based cycle that only schedules its *next* run once
+   the current one has settled (success or failure), wrapped in
+   `Promise.race` against a 30s watchdog timeout and a catch-all that logs
+   and moves on. Even an unexpected hang somewhere outside the fetch layer
+   can no longer stop the schedule.
+3. **Collect-on-query.** `GET /usage`, `GET /resets`, and `GET /recommend`
+   now call `collectAll(db)` before responding — which is cheap on the
+   common path (each provider's `collectXAndSave` only actually re-hits the
+   network once its data has aged past that provider's poll floor;
+   otherwise it's a cached-row read) and self-heals staleness caused by a
+   slow/wedged background loop. MCP's `get_usage`/`get_resets`/
+   `recommend_model` already did this from Phase 3; the CLI gets it for free
+   by talking to the server (its direct-collection fallback path already did
+   this too). Collection attempts are additionally capped at 12s
+   (`COLLECT_ATTEMPT_TIMEOUT_MS` in `src/collect.ts`) so a request can never
+   hang waiting on a re-collect — on failure/timeout it serves the
+   last-known snapshot with an honest `"re-collect failed (...); serving
+   last-known data"` note rather than clobbering good history with a bare
+   failure row.
+
+**The stale-status rule.** Independent of what the last collector run
+reported, a provider whose collector hasn't actually *run* in over 3x its
+poll floor (`POLL_FLOORS_MS` in `src/collect.ts`: Codex 60s, Anthropic 180s,
+Warp 60s) is presented as `"stale"` in `src/present.ts`, with an explanatory
+note. This is keyed off **when the collector last ran** (`capturedAt`), not
+the age of the underlying data (`dataAsOf`) — those two diverge for a tactic
+like Warp's plist read, where `dataAsOf` tracks Warp's own last-usage
+timestamp and can be legitimately old just because Warp hasn't been used
+recently, even though the collector itself is running fine on every
+poll/collect-on-query. Using `capturedAt` means the rule fires exactly when
+it should (the poll loop stopped advancing) and doesn't false-positive on
+normal inactivity. The CLI, dashboard, and MCP surfaces already render
+`stale`/`unavailable` badges identically to `ok` — this rule is what makes
+sure they actually get triggered by a wedge instead of a badge staying `ok`
+next to a 22-hour-old timestamp, like it did on Jul 13.
+
 ## Web dashboard (Phase 5)
 
 ```bash
@@ -178,6 +267,11 @@ every 30s client-side:
   weekly) with a reset countdown; Warp gets a linear pool bar (used/limit +
   refresh countdown) since it has no window semantics. Every card shows a
   data-freshness pill (`OK`/`STALE`/`UNAVAILABLE`), source, and data age.
+  Anthropic additionally renders a linear meter row per `modelWindows` entry
+  (e.g. the temporary "Fable" weekly bucket) and a usage-credits line
+  (spent/limit + enabled badge + reset countdown) — both driven entirely by
+  what `GET /usage` returns, so the card silently shows nothing extra when
+  a provider reports none (e.g. once the Fable bucket expires).
 - **Estimate & recommend panel**: click a task-profile chip
   (`small_fix`/`feature`/`large_refactor`/`research`) to get a live
   `recommend_model`-equivalent call against `GET /recommend` — shows the

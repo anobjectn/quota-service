@@ -4,9 +4,16 @@
 
 import type { Database } from "bun:sqlite";
 import { getLatestResetCredits, getLatestSnapshot, getManualEntries } from "./db";
+import { POLL_FLOORS_MS } from "./collect";
 import type { CollectorResult, ManualEntry, Provider, ResetCreditsResult } from "./types";
 
 const PROVIDERS: Provider[] = ["codex", "anthropic", "warp"];
+
+/** A provider whose data is older than this multiple of its poll floor is
+ * presented as "stale" regardless of what the last collector run reported —
+ * this is what makes a wedged poll loop visible instead of silently serving
+ * hours-old data under an "ok" badge (the Jul 13 incident this guards against). */
+const STALE_AGE_MULTIPLIER = 3;
 
 export interface ProviderReport {
   provider: Provider;
@@ -45,14 +52,27 @@ function buildProviderReport(db: Database, provider: Provider, now: number): Pro
       manualEntries,
     };
   }
+  const dataAgeMs = latest.dataAsOf != null ? now - latest.dataAsOf : null;
+  // The wedge signal is "how long since the poll loop last successfully ran
+  // this provider's collector" (capturedAt), not "how old is the underlying
+  // event" (dataAsOf) — those two diverge for tactics like Warp's plist read,
+  // where dataAsOf tracks Warp's own last-usage timestamp and can be legitimately
+  // old (Warp just isn't running) even though the collector itself runs fine on
+  // every poll/collect-on-query. capturedAt advances every time the collector
+  // actually runs, so it's what a stalled poll loop would leave behind stale.
+  const collectorAgeMs = now - latest.capturedAt;
+  const floorMs = POLL_FLOORS_MS[provider];
+  const isStaleByAge = latest.status === "ok" && floorMs != null && collectorAgeMs > floorMs * STALE_AGE_MULTIPLIER;
   return {
     provider,
-    status: latest.status,
+    status: isStaleByAge ? "stale" : latest.status,
     source: latest.source,
-    dataAgeMs: latest.dataAsOf != null ? now - latest.dataAsOf : null,
+    dataAgeMs,
     capturedAt: latest.capturedAt,
     snapshot: latest.snapshot,
-    error: latest.error,
+    error: isStaleByAge
+      ? `collector last ran ${Math.round(collectorAgeMs / 1000)}s ago, exceeding ${STALE_AGE_MULTIPLIER}x the ${provider} poll floor (${Math.round(floorMs! / 1000)}s) — poll loop may be stalled`
+      : latest.error,
     manualEntries,
   };
 }

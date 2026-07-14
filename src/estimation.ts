@@ -168,6 +168,34 @@ interface ProviderHeadroom {
   flagReason: string | null;
 }
 
+/** For Anthropic's frontier tier (Fable 5), the binding constraint is the
+ * MINIMUM headroom across 5h, all-models weekly, AND any per-model weekly
+ * window Anthropic happens to be reporting right now (e.g. a "Fable" bucket
+ * — generic by construction, not hardcoded: whatever keys show up in
+ * `modelWindows` are considered). A fresh per-model bucket can make the
+ * frontier tier cheaper to recommend even when the all-models weekly window
+ * is tight, which is exactly the scenario this exists to catch. */
+function computeAnthropicFrontierHeadroom(report: ProviderReport): ProviderHeadroom {
+  const base = computeHeadroom(report);
+  if (report.status === "unavailable" || !report.snapshot || report.snapshot.kind !== "window") {
+    return base;
+  }
+  const modelWindows = report.snapshot.modelWindows;
+  if (!modelWindows || Object.keys(modelWindows).length === 0) {
+    return base;
+  }
+  let minHeadroom = base.headroomPercent;
+  let constraint = base.constraint;
+  for (const [name, w] of Object.entries(modelWindows)) {
+    const headroom = 100 - w.usedPercent;
+    if (minHeadroom === null || headroom < minHeadroom) {
+      minHeadroom = headroom;
+      constraint = `${name} weekly window`;
+    }
+  }
+  return { ...base, headroomPercent: minHeadroom, constraint };
+}
+
 /** The binding constraint for a provider is whichever tracked window/pool is
  * closest to exhaustion — that's what will actually block further work. */
 function computeHeadroom(report: ProviderReport): ProviderHeadroom {
@@ -230,6 +258,10 @@ export interface RecommendModelResult {
   reason: string;
   alternates: RecommendationCandidate[];
   warnings: string[];
+  /** Enabled usage-credits balance with remaining headroom, surfaced as a
+   * manual-fallback note (same spirit as Warp's manual add-on-credit entry)
+   * — never factored into automated ranking/spending. */
+  usageCreditsNote: string | null;
 }
 
 export function recommendModel(taskProfile: TaskProfile, usage: UsageReport): RecommendModelResult {
@@ -246,7 +278,10 @@ export function recommendModel(taskProfile: TaskProfile, usage: UsageReport): Re
 
   function candidatesForTier(tier: ModelTier): RecommendationCandidate[] {
     return ROSTER.filter((r) => r.tier === tier).map((r) => {
-      const h = headroomByProvider.find((x) => x.provider === r.provider)!;
+      const h =
+        r.provider === "anthropic" && tier === "frontier"
+          ? computeAnthropicFrontierHeadroom(usage.providers.find((p) => p.provider === "anthropic")!)
+          : headroomByProvider.find((x) => x.provider === r.provider)!;
       return {
         provider: r.provider,
         tier: r.tier,
@@ -305,6 +340,8 @@ export function recommendModel(taskProfile: TaskProfile, usage: UsageReport): Re
     reason = `Task profile "${taskProfile}" maps to rubric tier "${effectiveTier}"${tierNote}. ${top.provider} has the most headroom (${top.headroomPercent.toFixed(1)}% remaining on its ${top.constraint ?? "tracked resource"}) among ${effectiveTier}-tier options — recommend ${top.model}.`;
   }
 
+  const usageCreditsNote = buildUsageCreditsNote(usage);
+
   return {
     taskProfile,
     estimate,
@@ -313,5 +350,26 @@ export function recommendModel(taskProfile: TaskProfile, usage: UsageReport): Re
     reason,
     alternates,
     warnings,
+    usageCreditsNote,
   };
+}
+
+/** Flags an enabled, non-exhausted usage-credits balance as a manual fallback
+ * note — mirrors how Warp's manual add-on credits show up as informational
+ * only. Never used to influence ranking or trigger any spend. */
+function buildUsageCreditsNote(usage: UsageReport): string | null {
+  for (const p of usage.providers) {
+    const snapshot = p.snapshot;
+    if (!snapshot || snapshot.kind !== "window") continue;
+    const credits = snapshot.usageCredits;
+    if (!credits || !credits.enabled) continue;
+    const remaining = credits.limitAmount != null ? credits.limitAmount - credits.spentAmount : null;
+    if (remaining == null || remaining <= 0) continue;
+    const limitStr = credits.limitAmount != null ? credits.limitAmount.toFixed(2) : "?";
+    return (
+      `${p.provider} usage credits enabled: $${credits.spentAmount.toFixed(2)} spent of $${limitStr} ${credits.currency}` +
+      ` ($${remaining.toFixed(2)} remaining) — manual fallback only, never auto-spent.`
+    );
+  }
+  return null;
 }

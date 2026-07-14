@@ -170,6 +170,11 @@ async function readCodexAuth(): Promise<CodexAuth | null> {
 
 const WHAM_BASE = "https://chatgpt.com/backend-api/wham";
 
+// Same rationale as ANTHROPIC's FETCH_TIMEOUT_MS: a fetch with no deadline
+// can hang indefinitely (observed after macOS sleep/wake), which wedges
+// whatever awaits it — the poll loop, or a collect-on-query request.
+const FETCH_TIMEOUT_MS = 10_000;
+
 // Live shape observed 2026-07-12 differs from the app-server RPC shape the
 // research doc anchored on: it's `rate_limit.{primary_window,secondary_window}`
 // (singular, nested), each `{used_percent, limit_window_seconds, reset_after_seconds,
@@ -252,7 +257,7 @@ export async function collectCodexFromApi(): Promise<CollectorResult> {
       "User-Agent": "quota-service/0.1 (+codex-cli-compatible)",
     };
     if (accountId) headers["ChatGPT-Account-Id"] = accountId;
-    const res = await fetch(`${WHAM_BASE}/usage`, { headers });
+    const res = await fetch(`${WHAM_BASE}/usage`, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (res.status === 401) {
       return degradeToFile("wham/usage HTTP 401 (stale credentials)");
     }
@@ -307,7 +312,7 @@ export async function collectCodexResetCredits(): Promise<ResetCreditsResult> {
       "User-Agent": "quota-service/0.1 (+codex-cli-compatible)",
     };
     if (accountId) headers["ChatGPT-Account-Id"] = accountId;
-    const res = await fetch(`${WHAM_BASE}/rate-limit-reset-credits`, { headers });
+    const res = await fetch(`${WHAM_BASE}/rate-limit-reset-credits`, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) {
       return {
         provider: "codex",

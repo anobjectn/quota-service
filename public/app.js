@@ -117,7 +117,44 @@ function renderWindowCard(p) {
   if (extra.bankedResetCreditsAvailable != null) {
     chips += `<span class="info-chip">banked reset credits: ${extra.bankedResetCreditsAvailable}</span>`;
   }
-  return { gauges, chips };
+
+  // Per-model windows (e.g. Anthropic's temporary Fable bucket) — renders as
+  // a meter row per bucket dynamically; zero UI change when there are none.
+  const modelWindows = snap?.modelWindows ?? {};
+  const modelWindowNames = Object.keys(modelWindows);
+  let modelWindowsHtml = "";
+  if (modelWindowNames.length > 0) {
+    const rows = modelWindowNames
+      .map((name) => {
+        const w = modelWindows[name];
+        const color = usageColor(w.usedPercent);
+        return `<div class="model-window-row">
+          <div class="model-window-meta">
+            <span class="model-window-name">${name}</span>
+            <span class="model-window-value">${w.usedPercent.toFixed(0)}%</span>
+          </div>
+          <div class="model-window-track"><div class="model-window-fill" style="width:${Math.min(100, w.usedPercent)}%; background:${color}; box-shadow: 0 0 8px ${color}55;"></div></div>
+          <div class="model-window-reset">resets ${fmtCountdown(w.resetsAt)}</div>
+        </div>`;
+      })
+      .join("");
+    modelWindowsHtml = `<div class="model-window-list">${rows}</div>`;
+  }
+
+  // Usage credits — first-class field, rendered as a compact line.
+  const credits = snap?.usageCredits;
+  let creditsHtml = "";
+  if (credits) {
+    const badgeClass = credits.enabled ? "credits-badge-on" : "credits-badge-off";
+    const limitStr = credits.limitAmount != null ? credits.limitAmount.toFixed(2) : "?";
+    const resetStr = credits.resetsAt != null ? ` · resets ${fmtCountdown(credits.resetsAt)}` : "";
+    creditsHtml = `<div class="credits-line">
+      <span class="credits-badge ${badgeClass}">${credits.enabled ? "credits enabled" : "credits disabled"}</span>
+      <span class="credits-amount">$${credits.spentAmount.toFixed(2)} / $${limitStr} ${credits.currency}${resetStr}</span>
+    </div>`;
+  }
+
+  return { gauges, chips, modelWindowsHtml, creditsHtml };
 }
 
 function renderPoolCard(p) {
@@ -139,7 +176,7 @@ function renderPoolCard(p) {
 
 function renderCard(p) {
   const isWindow = p.snapshot?.kind === "window";
-  const { gauges, chips } = p.snapshot
+  const { gauges, chips, modelWindowsHtml = "", creditsHtml = "" } = p.snapshot
     ? (isWindow ? renderWindowCard(p) : renderPoolCard(p))
     : { gauges: `<p class="muted">no data collected yet</p>`, chips: "" };
 
@@ -162,7 +199,9 @@ function renderCard(p) {
         ${statusPill(p.status)}
       </div>
       <div class="${isWindow ? "gauge-row" : ""}">${gauges}</div>
+      ${modelWindowsHtml}
       <div class="chip-row">${chips}${manualChips}</div>
+      ${creditsHtml}
       ${note}
       <div class="card-footer">
         <a class="purchase-link" href="${link}" target="_blank" rel="noopener">manage / purchase ↗</a>

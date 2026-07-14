@@ -307,6 +307,84 @@ code {
   color: var(--ink-secondary);
 }
 
+/* Per-model windows (e.g. Anthropic's temporary Fable bucket) — a compact
+   meter row per bucket, rendered dynamically under the gauge row. */
+.model-window-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.model-window-row { font-size: 11px; }
+
+.model-window-meta {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  color: var(--ink-secondary);
+}
+
+.model-window-name {
+  font-weight: 600;
+  color: var(--ink-primary);
+}
+
+.model-window-value { font-variant-numeric: tabular-nums; }
+
+.model-window-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  overflow: hidden;
+}
+
+.model-window-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.5s ease;
+}
+
+.model-window-reset {
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--ink-muted);
+}
+
+/* Usage credits — first-class, compact line under the chip row. */
+.credits-line {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.credits-badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.credits-badge-on {
+  color: var(--status-ok);
+  border-color: var(--status-ok);
+  box-shadow: 0 0 6px var(--status-ok-glow);
+}
+
+.credits-badge-off {
+  color: var(--ink-muted);
+}
+
+.credits-amount {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-secondary);
+}
+
 .chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 
 .info-chip {

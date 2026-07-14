@@ -20,11 +20,31 @@ export interface WindowQuota {
   resetsAt: number | null;
 }
 
+/** Usage-credits balance (Anthropic's "Usage credits" add-on, and analogous
+ * per-provider spend-based fallback balances). First-class, not a raw blob,
+ * so presenters don't need to know the provider's wire shape. */
+export interface UsageCredits {
+  enabled: boolean;
+  /** major currency units, e.g. dollars (already divided by the wire exponent) */
+  spentAmount: number;
+  limitAmount: number | null;
+  currency: string;
+  /** unix ms epoch, or null if the provider doesn't report a reset date */
+  resetsAt: number | null;
+}
+
 export interface WindowSnapshot {
   kind: "window";
   fiveHour: WindowQuota | null;
   weekly: WindowQuota | null;
-  /** provider-specific extras (plan type, per-model weekly windows, extra-usage state, etc.) */
+  /** Per-model weekly (or other) buckets keyed by whatever name the provider
+   * reports (e.g. "Fable"). Generic by design — a provider may surface zero,
+   * one, or several of these, and they can appear/disappear over time (e.g.
+   * Anthropic's temporary Fable bucket) without any schema change. */
+  modelWindows?: Record<string, WindowQuota>;
+  /** Usage-credits / spend-based fallback balance, when the provider reports one. */
+  usageCredits?: UsageCredits | null;
+  /** provider-specific extras (plan type, raw per-model debug fields, etc.) */
   extra?: Record<string, unknown>;
 }
 
