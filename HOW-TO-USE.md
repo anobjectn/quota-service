@@ -25,7 +25,12 @@ know whether what you're looking at is current.
 ```bash
 cd /Users/luis/htdocs/quota-service
 
-# one-shot, no server needed (this is what most people will do day to day)
+# web dashboard (recommended — starts server + opens at http://127.0.0.1:8787/)
+bin/serve                        # default port 8787, localhost only
+bin/serve --port 9000            # different port
+bin/serve --host <tailnet-ip>    # expose on your tailnet
+
+# one-shot CLI, no server needed (this is what most people will do day to day)
 bin/quota            # human table, all three providers
 bin/quota json        # same data, machine-readable
 bin/quota resets       # natural reset countdowns + Codex banked reset credits
@@ -70,16 +75,19 @@ Notes on what you're seeing:
 - Warp has **no 5h/weekly windows at all** — it's a monthly credit pool, shown
   as `used/limit (%)` plus a refresh countdown, not a percent-of-window.
 
-## Running the server (optional, for continuous polling)
+## Running the server / web dashboard
 
 ```bash
-bun run serve                 # binds 127.0.0.1:8787, polls every 5 min by default
-bun run serve --port 9000      # different port
-bun run serve --poll-ms 60000   # poll more/less often (per-provider floors still enforced)
-bun run serve --host <tailnet-ip-or-hostname>   # expose beyond localhost, e.g. on your tailnet
+bin/serve                                       # dashboard at http://127.0.0.1:8787/
+bin/serve --port 9000                           # different port
+bin/serve --poll-ms 60000                       # poll more/less often (per-provider floors still enforced)
+bin/serve --host <tailnet-ip-or-hostname>       # expose beyond localhost, e.g. on your tailnet
+
+# equivalent long-form (same flags, same binary):
+bun run serve
 ```
 
-Routes: `GET /usage`, `GET /resets`, `GET /status`, `GET /estimate[?taskProfile=...]`,
+Routes: `GET /usage`, `GET /runs`, `GET /resets`, `GET /status`, `GET /estimate[?taskProfile=...]`,
 `GET /recommend[?taskProfile=...]`, `POST /manual` (body:
 `{provider, field, value, note?}`), and the dashboard itself at `GET /`
 (static files served from `public/`).
@@ -272,6 +280,32 @@ every 30s client-side:
   (spent/limit + enabled badge + reset countdown) — both driven entirely by
   what `GET /usage` returns, so the card silently shows nothing extra when
   a provider reports none (e.g. once the Fable bucket expires).
+- **Recent-run ledger**: Codex and Anthropic cards also read `GET /runs` and
+  show the eight newest activity bursts from the local session logs. A burst
+  is split after 30 minutes idle, so resuming an old thread does not make it
+  look like one multi-day run. Each row shows an ellipsized prompt/thread
+  label, start time and duration, model, recorded reasoning effort (Claude
+  Fable/Mythos is labeled `adaptive`), total/input/cache/output tokens,
+  subagent status, and an estimated API-key equivalent. When a live 5-hour
+  reset is available, a summary above the rows totals runs that ended inside
+  the current window. Codex reads `~/.codex/sessions` and
+  `~/.codex/archived_sessions`; Anthropic reads `~/.claude/projects`, including
+  subagent logs. Claude streamed rows are deduplicated by message ID.
+
+  The dollar number is explicitly an **API-equivalent estimate**, not what the
+  subscription charged and not a reverse-engineering of provider quota
+  weights. It applies current public list prices to the token categories in
+  each log (including discounted cache reads and Claude 5-minute/1-hour cache
+  writes). Provider-controlled subscription windows can weight models,
+  effort, tools, and demand differently. The ledger therefore explains what
+  ran and its relative size/cost, while the gauge remains the source of truth
+  for quota consumed. `GET /runs?refresh=1` bypasses its 20-second filesystem
+  cache for diagnostics.
+
+  Pricing is model-aware and date-aware where list pricing has a published
+  cutoff (currently Claude Sonnet 5's introductory $2/$10 per MTok through
+  2026-08-31, after which new runs use its standard $3/$15 rate). Pricing
+  constants live together in `src/run-history.ts` for straightforward updates.
 - **Estimate & recommend panel**: click a task-profile chip
   (`small_fix`/`feature`/`large_refactor`/`research`) to get a live
   `recommend_model`-equivalent call against `GET /recommend` — shows the

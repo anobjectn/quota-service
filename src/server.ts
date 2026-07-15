@@ -9,6 +9,7 @@ import { collectAll } from "./collect";
 import { buildResetsReport, buildUsageReport } from "./present";
 import { estimateCost, isValidTaskProfile, recommendModel } from "./estimation";
 import { join } from "node:path";
+import { collectRunHistory } from "./run-history";
 
 function parseArgs(argv: string[]): { host: string; port: number; pollMs: number } {
   let host = "127.0.0.1";
@@ -98,6 +99,9 @@ const server = Bun.serve({
       await collectAll(db).catch(() => undefined);
       return Response.json(buildResetsReport(db));
     }
+    if (url.pathname === "/runs") {
+      return Response.json(await collectRunHistory(url.searchParams.get("refresh") === "1"));
+    }
     if (url.pathname === "/status") {
       return Response.json({ ok: true, uptimeMs: process.uptime() * 1000, pollMs });
     }
@@ -143,7 +147,7 @@ const server = Bun.serve({
 
 console.log(`quota-service listening on http://${server.hostname}:${server.port}`);
 console.log(`  polling every ${Math.round(pollMs / 1000)}s (respects per-provider poll floors)`);
-console.log(`  routes: GET /usage  GET /resets  GET /status  GET /estimate  GET /recommend  POST /manual`);
+console.log(`  routes: GET /usage  GET /runs  GET /resets  GET /status  GET /estimate  GET /recommend  POST /manual`);
 console.log(`  dashboard: http://${server.hostname}:${server.port}/`);
 if (host === "127.0.0.1" || host === "localhost") {
   console.log(`  bound to localhost only; pass --host <tailnet-ip> to expose on the tailnet`);

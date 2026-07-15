@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Convenience wrapper — starts the HTTP server + web dashboard.
+# Dashboard: http://127.0.0.1:8787/   API: http://127.0.0.1:8787/usage etc.
+# Flags forwarded to src/server.ts:
+#   --port <n>              (default 8787)
+#   --host <ip/hostname>    (default 127.0.0.1; use tailnet IP to expose beyond localhost)
+#   --poll-ms <ms>          (default 300000, i.e. 5 min)
+# See HOW-TO-USE.md for full details.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec bun run "$SCRIPT_DIR/../src/server.ts" "$@"

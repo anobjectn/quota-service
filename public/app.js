@@ -1,5 +1,5 @@
 // quota-service dashboard — vanilla JS, no framework, no build step.
-// Reads GET /usage, GET /resets, GET /recommend?taskProfile=..., and posts
+// Reads GET /usage, GET /runs, GET /resets, GET /recommend?taskProfile=..., and posts
 // to POST /manual (Warp add-on credits). Read-only against provider systems
 // everywhere else — this file never calls a consume/purchase endpoint.
 
@@ -16,6 +16,15 @@ const PURCHASE_LINKS = {
   anthropic: "https://claude.ai/settings/billing",
   warp: "warp://settings/billing",
 };
+
+function esc(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
 
 function statusColorVar(status) {
   if (status === "ok") return "var(--status-ok)";
@@ -60,6 +69,67 @@ function fmtCountdown(ts) {
   if (hr < 48) return `${hr}h ${min % 60}m`;
   const days = Math.floor(hr / 24);
   return `${days}d ${hr % 24}h`;
+}
+
+function fmtTokens(value) {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}m`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k`;
+  return value.toLocaleString();
+}
+
+function fmtRunTime(run) {
+  const start = new Date(run.startedAt);
+  const durationMs = Math.max(0, run.endedAt - run.startedAt);
+  const durationMin = Math.max(1, Math.round(durationMs / 60_000));
+  const duration = durationMin >= 60 ? `${Math.floor(durationMin / 60)}h ${durationMin % 60}m` : `${durationMin}m`;
+  const today = new Date();
+  const sameDay = start.toDateString() === today.toDateString();
+  const day = sameDay ? "" : `${start.toLocaleDateString([], { month: "short", day: "numeric" })}, `;
+  return `${day}${start.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} · ${duration}`;
+}
+
+function renderRunHistory(provider, runs = [], snapshot = null) {
+  if (provider === "warp") return "";
+  const fiveHourStart = snapshot?.kind === "window" && snapshot.fiveHour?.resetsAt
+    ? snapshot.fiveHour.resetsAt - 5 * 60 * 60_000
+    : null;
+  const windowRuns = fiveHourStart ? runs.filter((run) => run.endedAt >= fiveHourStart) : [];
+  const windowTokens = windowRuns.reduce((sum, run) => sum + run.totalTokens, 0);
+  const windowCost = windowRuns.reduce((sum, run) => sum + run.apiEquivalentUsd, 0);
+  const windowSummary = fiveHourStart && windowRuns.length
+    ? `<div class="run-window-summary"><b>${windowRuns.length}</b> run${windowRuns.length === 1 ? "" : "s"} since ${new Date(fiveHourStart).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}<span>${fmtTokens(windowTokens)} tokens · ≈ $${windowCost.toFixed(2)}</span></div>`
+    : "";
+  const rows = runs.length
+    ? runs.map((run) => {
+        const effort = run.effort ? `<span class="run-effort${run.effort === "ultra" ? " is-ultra" : ""}">${esc(run.effort)}</span>` : "";
+        const cache = run.cachedInputTokens + run.cacheWriteTokens;
+        return `<li class="run-row">
+          <div class="run-primary">
+            <div class="run-title" title="${esc(run.title)}">${run.isSubagent ? '<span class="run-agent">agent</span>' : ""}${esc(run.title)}</div>
+            <span class="run-when">${esc(fmtRunTime(run))}</span>
+          </div>
+          <div class="run-model-line">
+            <span class="run-model">${esc(run.model)}</span>${effort}
+            <span class="run-cost" title="List rate: ${esc(run.rateLabel)}">≈ $${run.apiEquivalentUsd.toFixed(2)} API</span>
+          </div>
+          <div class="run-token-line" aria-label="${run.totalTokens.toLocaleString()} total tokens">
+            <span><b>${fmtTokens(run.totalTokens)}</b> total</span>
+            <span>in ${fmtTokens(run.inputTokens)}</span>
+            ${cache ? `<span>cache ${fmtTokens(cache)}</span>` : ""}
+            <span>out ${fmtTokens(run.outputTokens)}</span>
+          </div>
+        </li>`;
+      }).join("")
+    : `<li class="run-empty">No local run telemetry found.</li>`;
+  return `<section class="run-history" aria-label="Recent ${esc(PROVIDER_LABEL[provider])} runs">
+    <div class="run-history-head">
+      <span>recent runs</span>
+      <span>API equivalent</span>
+    </div>
+    ${windowSummary}
+    <ol class="run-list">${rows}</ol>
+    <p class="run-disclaimer">Local session logs · cached input is priced separately · quota % is provider-controlled</p>
+  </section>`;
 }
 
 function arcGauge(percent, color, size = 92, stroke = 9) {
@@ -174,7 +244,7 @@ function renderPoolCard(p) {
   };
 }
 
-function renderCard(p) {
+function renderCard(p, runs) {
   const isWindow = p.snapshot?.kind === "window";
   const { gauges, chips, modelWindowsHtml = "", creditsHtml = "" } = p.snapshot
     ? (isWindow ? renderWindowCard(p) : renderPoolCard(p))
@@ -203,6 +273,7 @@ function renderCard(p) {
       <div class="chip-row">${chips}${manualChips}</div>
       ${creditsHtml}
       ${note}
+      ${renderRunHistory(p.provider, runs, p.snapshot)}
       <div class="card-footer">
         <a class="purchase-link" href="${link}" target="_blank" rel="noopener">manage / purchase ↗</a>
         <span class="card-age">source: ${p.source ?? "-"} · age: ${fmtAge(p.dataAgeMs)}</span>
@@ -230,9 +301,9 @@ function overallState(providers) {
 
 async function loadUsage() {
   try {
-    const res = await fetch("/usage");
-    const report = await res.json();
-    document.getElementById("cards").innerHTML = report.providers.map(renderCard).join("");
+    const [usageRes, runsRes] = await Promise.all([fetch("/usage"), fetch("/runs")]);
+    const [report, history] = await Promise.all([usageRes.json(), runsRes.json()]);
+    document.getElementById("cards").innerHTML = report.providers.map((provider) => renderCard(provider, history.providers?.[provider.provider] ?? [])).join("");
     document.getElementById("generated-at").textContent = new Date(report.generatedAt).toLocaleString();
 
     const state = overallState(report.providers);

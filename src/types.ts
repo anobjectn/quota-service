@@ -109,3 +109,25 @@ export interface ManualEntry {
   note: string | null;
   updatedAt: number;
 }
+
+/** One contiguous burst of activity in a local Codex/Claude session log.
+ * Bursts are split after 30 minutes idle so a thread resumed days later does
+ * not masquerade as one enormous run. Dollar amounts are API-list-price
+ * equivalents, not subscription charges. */
+export interface RunUsage {
+  id: string;
+  provider: "codex" | "anthropic";
+  title: string;
+  startedAt: number;
+  endedAt: number;
+  model: string;
+  effort: string | null;
+  isSubagent: boolean;
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  apiEquivalentUsd: number;
+  rateLabel: string;
+}
