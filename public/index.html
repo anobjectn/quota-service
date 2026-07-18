@@ -7,14 +7,13 @@
 <link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="any" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,560;0,9..144,680;1,9..144,500&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="/styles.css" />
 </head>
 <body data-palette="ok,warning,critical">
-  <div class="grain"></div>
   <header class="topbar">
     <div class="brand">
-      <img class="brand-mark" src="/favicon.svg" alt="" width="40" height="40" />
+      <img class="brand-mark" src="/favicon.svg" alt="" width="38" height="38" />
       <div class="brand-text">
         <h1>quota<span class="brand-slash">//</span>mission control</h1>
         <p class="brand-sub">personal usage telemetry — codex · anthropic · warp</p>
@@ -23,7 +22,7 @@
     <div class="topbar-right">
       <div id="overall-badge" class="overall-badge" data-state="ok">
         <span class="dot"></span>
-        <span class="overall-text">ALL SYSTEMS NOMINAL</span>
+        <span class="overall-text">All systems nominal</span>
       </div>
       <div class="clock" id="clock">--:--:--</div>
     </div>
@@ -34,53 +33,21 @@
       <!-- provider cards injected by app.js -->
     </section>
 
-    <aside class="side">
-      <div class="panel estimate-panel">
-        <h2 class="panel-title">estimate &amp; recommend</h2>
-        <p class="panel-hint">v1.5 heuristic — task profile → model tier, ranked by live headroom.</p>
+    <section class="panel estimate-panel" aria-label="estimate and recommend">
+      <div class="estimate-intro">
+        <h2 class="panel-title">Estimate &amp; recommend</h2>
+        <p class="panel-hint">Pick a task profile to get a live model recommendation, ranked by current headroom.</p>
         <div class="profile-row" id="profile-row">
-          <button class="chip" data-profile="small_fix">small fix</button>
-          <button class="chip" data-profile="feature">feature</button>
-          <button class="chip" data-profile="large_refactor">large refactor</button>
-          <button class="chip" data-profile="research">research</button>
-        </div>
-        <div id="recommend-result" class="recommend-result">
-          <p class="muted">Pick a task profile to see a live recommendation.</p>
+          <button class="chip" data-profile="small_fix">Small fix</button>
+          <button class="chip" data-profile="feature">Feature</button>
+          <button class="chip" data-profile="large_refactor">Large refactor</button>
+          <button class="chip" data-profile="research">Research</button>
         </div>
       </div>
-
-      <div class="panel manual-panel">
-        <h2 class="panel-title">manual entry</h2>
-        <p class="panel-hint">Warp add-on credits have no programmatic source (Phase 0 finding) — record the balance from <code>warp://settings/billing</code> here.</p>
-        <form id="manual-form" class="manual-form">
-          <label>
-            provider
-            <select name="provider" id="manual-provider">
-              <option value="warp" selected>warp</option>
-            </select>
-          </label>
-          <label>
-            field
-            <input type="text" name="field" id="manual-field" value="addon_credits" />
-          </label>
-          <label>
-            value
-            <input type="text" name="value" id="manual-value" placeholder="e.g. 1010" required />
-          </label>
-          <label>
-            note
-            <input type="text" name="note" id="manual-note" placeholder="e.g. purchased 2026-07-12" />
-          </label>
-          <button type="submit">save entry</button>
-        </form>
-        <p id="manual-status" class="manual-status" aria-live="polite"></p>
+      <div id="recommend-result" class="recommend-result">
+        <p class="muted">Pick a task profile above to see a live recommendation.</p>
       </div>
-
-      <div class="panel feed-panel">
-        <h2 class="panel-title">status feed</h2>
-        <p class="panel-hint muted">Phase 6 (stretch) — not built this pass. Designed shape: agents <code>post_status</code> a short progress string per harness/task; this panel would list the feed newest-first with a harness chip and relative timestamp, backed by <code>GET /status-feed</code>. See HOW-TO-USE.md.</p>
-      </div>
-    </aside>
+    </section>
   </main>
 
   <footer class="footer">

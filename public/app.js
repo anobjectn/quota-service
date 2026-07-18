@@ -127,7 +127,7 @@ function renderRunHistory(provider, runs = [], snapshot = null) {
       <span>API equivalent</span>
     </div>
     ${windowSummary}
-    <ol class="run-list">${rows}</ol>
+    <ol class="run-list" tabindex="0" aria-label="Scrollable recent run history">${rows}</ol>
     <p class="run-disclaimer">Local session logs · cached input is priced separately · quota % is provider-controlled</p>
   </section>`;
 }
@@ -144,12 +144,12 @@ function arcGauge(percent, color, size = 92, stroke = 9) {
         stroke-width="${stroke}" stroke-linecap="round"
         stroke-dasharray="${used} ${c - used}"
         transform="rotate(-90 ${cx} ${cy})"
-        style="filter: drop-shadow(0 0 5px ${color}66); transition: stroke-dasharray 0.6s ease;" />
+        style="transition: stroke-dasharray 0.6s ease;" />
     </svg>`;
 }
 
 function statusPill(status) {
-  const label = { ok: "OK", stale: "STALE", unavailable: "UNAVAILABLE", unknown: "UNKNOWN" }[status] ?? status.toUpperCase();
+  const label = { ok: "Ok", stale: "Stale", unavailable: "Unavailable", unknown: "Unknown" }[status] ?? status;
   return `<span class="status-pill" data-status="${status}"><span class="dot"></span>${label}</span>`;
 }
 
@@ -203,7 +203,7 @@ function renderWindowCard(p) {
             <span class="model-window-name">${name}</span>
             <span class="model-window-value">${w.usedPercent.toFixed(0)}%</span>
           </div>
-          <div class="model-window-track"><div class="model-window-fill" style="width:${Math.min(100, w.usedPercent)}%; background:${color}; box-shadow: 0 0 8px ${color}55;"></div></div>
+          <div class="model-window-track"><div class="model-window-fill" style="width:${Math.min(100, w.usedPercent)}%; background:${color};"></div></div>
           <div class="model-window-reset">resets ${fmtCountdown(w.resetsAt)}</div>
         </div>`;
       })
@@ -227,19 +227,69 @@ function renderWindowCard(p) {
   return { gauges, chips, modelWindowsHtml, creditsHtml };
 }
 
+function renderManualForm() {
+  return `<div class="warp-manual">
+    <div class="warp-manual-head">
+      <span class="warp-manual-title">Add-on credits</span>
+      <span class="muted">not exposed by Warp's API — record it from <code>warp://settings/billing</code></span>
+    </div>
+    <form class="manual-form" data-manual-form>
+      <label class="manual-field">
+        <span>Balance</span>
+        <input type="text" name="value" placeholder="e.g. 1010" required />
+      </label>
+      <label class="manual-field">
+        <span>Note</span>
+        <input type="text" name="note" placeholder="optional" />
+      </label>
+      <button type="submit">Save</button>
+    </form>
+    <p class="manual-status" data-manual-status aria-live="polite"></p>
+  </div>`;
+}
+
 function renderPoolCard(p) {
   const pool = p.snapshot?.pool;
   if (!pool) return { gauges: `<p class="muted">no pool data</p>`, chips: "" };
   const color = usageColor(pool.usedPercent);
+  const extra = p.snapshot?.extra ?? {};
+  const remaining = Math.max(0, pool.limit - pool.used);
+  const renewal = pool.refreshesAt == null
+    ? "unknown"
+    : new Date(pool.refreshesAt).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+  const voiceLimit = Number(extra.voiceRequestLimit);
+  const voiceUsed = Number(extra.voiceRequestsUsed);
+  const voiceValue = extra.isUnlimitedVoice
+    ? "unlimited"
+    : Number.isFinite(voiceLimit) && Number.isFinite(voiceUsed)
+      ? `${voiceUsed.toLocaleString()} / ${voiceLimit.toLocaleString()}`
+      : "not reported";
+  const indexValue = extra.isUnlimitedCodebaseIndices
+    ? "unlimited"
+    : Number.isFinite(Number(extra.maxCodebaseIndices))
+      ? Number(extra.maxCodebaseIndices).toLocaleString()
+      : "not reported";
+  const fileValue = Number.isFinite(Number(extra.maxFilesPerRepo))
+    ? Number(extra.maxFilesPerRepo).toLocaleString()
+    : "not reported";
   return {
     gauges: `<div class="pool-block">
       <div class="pool-numbers">
         <span class="value">${pool.used.toLocaleString()} <span class="muted">/ ${pool.limit.toLocaleString()}</span></span>
         <span class="cadence">${pool.cadence ?? ""}</span>
       </div>
-      <div class="pool-track"><div class="pool-fill" style="width:${Math.min(100, pool.usedPercent)}%; background:${color}; box-shadow: 0 0 10px ${color}55;"></div></div>
+      <div class="pool-track"><div class="pool-fill" style="width:${Math.min(100, pool.usedPercent)}%; background:${color};"></div></div>
       <div class="pool-reset">refreshes ${fmtCountdown(pool.refreshesAt)}</div>
-    </div>`,
+    </div>
+    <div class="warp-detail-grid" aria-label="Warp plan details">
+      <div><span>remaining</span><strong>${remaining.toLocaleString()}</strong></div>
+      <div><span>utilization</span><strong>${pool.usedPercent.toFixed(1)}%</strong></div>
+      <div><span>renews</span><strong>${renewal}</strong></div>
+      <div><span>voice requests</span><strong>${voiceValue}</strong></div>
+      <div><span>codebase indexes</span><strong>${indexValue}</strong></div>
+      <div><span>files / repo</span><strong>${fileValue}</strong></div>
+    </div>
+    ${renderManualForm()}`,
     chips: "",
   };
 }
@@ -303,14 +353,20 @@ async function loadUsage() {
   try {
     const [usageRes, runsRes] = await Promise.all([fetch("/usage"), fetch("/runs")]);
     const [report, history] = await Promise.all([usageRes.json(), runsRes.json()]);
-    document.getElementById("cards").innerHTML = report.providers.map((provider) => renderCard(provider, history.providers?.[provider.provider] ?? [])).join("");
+    // Skip the refresh while the user is mid-edit in the Warp manual-entry
+    // form — it lives inside the auto-refreshing card markup, so replacing
+    // innerHTML here would wipe whatever they've typed.
+    const editingManualForm = document.activeElement?.closest(".manual-form");
+    if (!editingManualForm) {
+      document.getElementById("cards").innerHTML = report.providers.map((provider) => renderCard(provider, history.providers?.[provider.provider] ?? [])).join("");
+    }
     document.getElementById("generated-at").textContent = new Date(report.generatedAt).toLocaleString();
 
     const state = overallState(report.providers);
     const badge = document.getElementById("overall-badge");
     badge.dataset.state = state;
     badge.querySelector(".overall-text").textContent =
-      state === "ok" ? "ALL SYSTEMS NOMINAL" : state === "warning" ? "HEADROOM TIGHTENING" : "NEEDS ATTENTION";
+      state === "ok" ? "All systems nominal" : state === "warning" ? "Headroom tightening" : "Needs attention";
   } catch (err) {
     document.getElementById("cards").innerHTML = `<p class="card-note">Could not reach the quota-service server. Is <code>bun run serve</code> running? (${err})</p>`;
   }
@@ -353,30 +409,30 @@ document.getElementById("profile-row").addEventListener("click", (e) => {
   if (btn) selectProfile(btn.dataset.profile);
 });
 
-// ---------- manual entry form ----------
+// ---------- manual entry form (lives inside the Warp card) ----------
 
-document.getElementById("manual-form").addEventListener("submit", async (e) => {
+document.getElementById("cards").addEventListener("submit", async (e) => {
+  const form = e.target.closest(".manual-form");
+  if (!form) return;
   e.preventDefault();
-  const provider = document.getElementById("manual-provider").value;
-  const field = document.getElementById("manual-field").value.trim();
-  const value = document.getElementById("manual-value").value.trim();
-  const note = document.getElementById("manual-note").value.trim();
-  const statusEl = document.getElementById("manual-status");
-  statusEl.textContent = "saving…";
+  const value = form.querySelector('input[name="value"]').value.trim();
+  const note = form.querySelector('input[name="note"]').value.trim();
+  const statusEl = form.parentElement.querySelector("[data-manual-status]");
+  statusEl.textContent = "Saving…";
   statusEl.removeAttribute("data-ok");
   try {
     const res = await fetch("/manual", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider, field, value, note: note || null }),
+      body: JSON.stringify({ provider: "warp", field: "addon_credits", value, note: note || null }),
     });
     const body = await res.json();
     if (!res.ok || !body.ok) throw new Error(body.error ?? "unknown error");
-    statusEl.textContent = `saved ${provider}.${field} = ${value}`;
+    statusEl.textContent = `Saved — addon credits = ${value}`;
     statusEl.dataset.ok = "true";
     loadUsage();
   } catch (err) {
-    statusEl.textContent = `failed: ${err.message ?? err}`;
+    statusEl.textContent = `Failed: ${err.message ?? err}`;
     statusEl.dataset.ok = "false";
   }
 });

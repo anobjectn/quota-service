@@ -6,8 +6,8 @@ import type { RunUsage } from "./types";
 const CODEX_HOME = process.env.CODEX_HOME ?? join(homedir(), ".codex");
 const CLAUDE_HOME = process.env.CLAUDE_HOME ?? join(homedir(), ".claude");
 const IDLE_SPLIT_MS = 30 * 60_000;
-const FILES_PER_PROVIDER = 18;
-const RUNS_PER_PROVIDER = 8;
+const FILES_PER_PROVIDER = 96;
+const RUNS_PER_PROVIDER = 50;
 const CACHE_MS = 20_000;
 
 type Provider = RunUsage["provider"];

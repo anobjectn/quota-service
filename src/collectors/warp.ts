@@ -13,6 +13,12 @@ interface WarpLimitInfo {
   next_refresh_time: string; // ISO 8601
   is_unlimited: boolean;
   request_limit_refresh_duration: string; // e.g. "Monthly"
+  is_unlimited_voice?: boolean;
+  voice_request_limit?: number;
+  voice_requests_used_since_last_refresh?: number;
+  is_unlimited_codebase_indices?: boolean;
+  max_codebase_indices?: number;
+  max_files_per_repo?: number;
 }
 
 function toPoolSnapshot(info: WarpLimitInfo): PoolSnapshot {
@@ -30,6 +36,12 @@ function toPoolSnapshot(info: WarpLimitInfo): PoolSnapshot {
     },
     extra: {
       isUnlimited: info.is_unlimited,
+      isUnlimitedVoice: info.is_unlimited_voice,
+      voiceRequestLimit: info.voice_request_limit,
+      voiceRequestsUsed: info.voice_requests_used_since_last_refresh,
+      isUnlimitedCodebaseIndices: info.is_unlimited_codebase_indices,
+      maxCodebaseIndices: info.max_codebase_indices,
+      maxFilesPerRepo: info.max_files_per_repo,
     },
   };
 }

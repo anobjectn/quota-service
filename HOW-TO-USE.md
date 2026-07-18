@@ -281,7 +281,10 @@ every 30s client-side:
   what `GET /usage` returns, so the card silently shows nothing extra when
   a provider reports none (e.g. once the Fable bucket expires).
 - **Recent-run ledger**: Codex and Anthropic cards also read `GET /runs` and
-  show the eight newest activity bursts from the local session logs. A burst
+  show up to the 50 newest activity bursts from the local session logs. All
+  returned runs remain available in a ledger that scrolls after roughly eight
+  rows; the bound only prevents an unbounded archive scan and DOM on each
+  30-second dashboard refresh. A burst
   is split after 30 minutes idle, so resuming an old thread does not make it
   look like one multi-day run. Each row shows an ellipsized prompt/thread
   label, start time and duration, model, recorded reasoning effort (Claude
@@ -311,24 +314,28 @@ every 30s client-side:
   `recommend_model`-equivalent call against `GET /recommend` — shows the
   picked provider/model, the one-line reason, the token-range estimate, and
   alternates.
-- **Manual entry form**: same mechanism as `bin/quota manual set` (posts to
-  `POST /manual`) — use it instead of the CLI to record Warp add-on credits
-  from the dashboard.
+- **Manual entry form**: embedded directly in the Warp card (Warp is the only
+  provider with a manual field — Codex and Anthropic are both API-driven).
+  Same mechanism as `bin/quota manual set` (posts to `POST /manual`) — use it
+  instead of the CLI to record Warp add-on credits from the dashboard.
 - **Purchase/manage links**: static outbound links per provider (Codex →
   ChatGPT subscription settings, Anthropic → claude.ai billing, Warp →
   `warp://settings/billing`). Links only — nothing here ever calls a
   purchase/consume endpoint. Verify these still resolve if a provider
   reshuffles their settings UI; they were not exhaustively checked against
   every account state.
-- **Status feed panel**: present but inert — see "Status feed (Phase 6, not
-  built)" below.
+- No status feed panel is present in the markup — see "Status feed (Phase 6,
+  not built)" below for the designed-but-not-built shape, to be added fresh
+  whenever Phase 6 gets picked up.
 - No auth beyond network-level (tailnet), matching Plan B's default. Dark mode
   is the only mode (no light theme built).
 
 Colors: the four fixed status colors (`ok`/`stale`/`unavailable` badges, and
 the usage-magnitude ring/bar tint) come from the `dataviz` skill's validated
-status palette, checked against this app's dark surface. Typography: Fraunces
-(display) + JetBrains Mono (data/labels/UI chrome).
+status palette, checked against this app's dark surface. Typography: Manrope
+is the primary UI face (headings, labels, chrome); IBM Plex Mono is reserved
+for tabular figures (token counts, currency, gauge/percent readouts) where
+fixed-width alignment helps scanning.
 
 **Verified live** (this session): `curl` against `/`, `/styles.css`, `/app.js`
 all returned 200 with real content; `/usage`, `/estimate`, `/recommend` all
@@ -349,11 +356,11 @@ their sign-off. Designed-but-not-built shape, for whoever picks this up:
   `get_usage`/`get_resets`.
 - New SQLite table `status_feed (id, harness, task, message, posted_at)`,
   append-only like `snapshots`.
-- Dashboard: a "status feed" panel already exists in `public/index.html`
-  (currently just an explanatory placeholder) — replace its contents with a
-  newest-first list, each row showing a harness chip, the message, and a
-  relative timestamp; poll `GET /status-feed` on the same 30s interval as
-  `/usage`.
+- Dashboard: no panel exists yet in `public/index.html` (an earlier
+  placeholder panel was removed as dead weight in the 2026-07-17 UI revamp,
+  since it wasn't built) — add a new panel with a newest-first list, each row
+  showing a harness chip, the message, and a relative timestamp; poll
+  `GET /status-feed` on the same 30s interval as `/usage`.
 - Purpose (from the plan doc): the dashboard doubles as cross-harness mission
   control — agents in Codex/Claude Code/T3C/Warp `post_status` a short
   progress string, so the feed becomes the "what's running where" view.
