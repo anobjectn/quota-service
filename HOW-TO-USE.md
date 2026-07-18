@@ -1,8 +1,8 @@
 # quota-service — HOW TO USE
 
 Personal, local-first usage/quota tracker for Codex (ChatGPT Plus), Anthropic
-(Claude Code Pro), and Warp. Phases 1–5 of Plan B are built: SQLite store,
-collectors for all three providers, `quota` CLI, a small HTTP server, a stdio
+(Claude Code Pro), and optional Warp support. Phases 1–5 of Plan B are built: SQLite store,
+collectors for all three supported providers, `quota` CLI, a small HTTP server, a stdio
 MCP server registered in both Codex and Claude Code, task-profile cost
 estimation + model recommendation, and a web dashboard. Phase 6 (agent status
 feed) is stretch and not built — see "Status feed (Phase 6, not built)" below.
@@ -20,6 +20,30 @@ know whether what you're looking at is current.
 - Dependencies are already installed (`bun install` if you ever need to
   redo it — `node_modules/` is gitignored).
 
+## Provider selection
+
+`QUOTA_PROVIDERS` is an ordered, comma-separated list containing `codex`,
+`anthropic`, and/or `warp`. When it is unset, the service enables
+`codex,anthropic`; Warp is supported but opt-in. Copy `.env.example` to `.env`
+and add `warp` when this machine should collect it:
+
+```dotenv
+QUOTA_PROVIDERS=codex,anthropic,warp
+QUOTA_PORT=8787
+```
+
+The repository-local `.env` is ignored by Git and is loaded even when a CLI
+wrapper or MCP server is started from another directory. An explicitly
+exported environment variable takes precedence. Configuration is validated
+once at process startup, so restart the server or MCP process after changing
+it. Empty lists, empty entries, duplicates, and unknown provider names stop
+startup with an `Invalid QUOTA_PROVIDERS` error.
+
+Provider selection controls quota collection, `/usage`, `/resets`, model
+recommendations, and manual-entry validation. `/runs` remains independent:
+it reports actual Codex and Anthropic activity found in local session logs,
+even when one of those quota collectors is disabled.
+
 ## Quick start
 
 ```bash
@@ -31,7 +55,7 @@ bin/serve --port 9000            # different port
 bin/serve --host <tailnet-ip>    # expose on your tailnet
 
 # one-shot CLI, no server needed (this is what most people will do day to day)
-bin/quota            # human table, all three providers
+bin/quota            # human table, enabled providers
 bin/quota json        # same data, machine-readable
 bin/quota resets       # natural reset countdowns + Codex banked reset credits
 bin/quota resets json
@@ -46,7 +70,7 @@ to `feature` if omitted or unrecognized). These map onto the
 `plan-review-execute` skill's `model-rubric.md` tiering (light/mid/frontier)
 so both tools speak the same vocabulary.
 
-Sample real output (captured while building this):
+Sample default output (Warp appears as a third block only when enabled):
 
 ```
 $ bin/quota
@@ -61,9 +85,6 @@ Codex      [OK]          age: 7s ago  source: codex_api
 Anthropic  [OK]          age: 7s ago  source: anthropic_api
   5h window:     85.0%  resets in 4h 13m
   weekly window: 11.0%  resets in 2d 8h
-
-Warp       [OK]          age: 4m ago  source: warp_plist
-  pool: 1500/1500 (100.0%)  refreshes in 21d 1h [Monthly]
 ```
 
 Notes on what you're seeing:
@@ -72,7 +93,7 @@ Notes on what you're seeing:
   object once there's been a request in it since the reset. It'll show up
   again after your next Codex turn. The weekly window and banked reset credit
   are unaffected.
-- Warp has **no 5h/weekly windows at all** — it's a monthly credit pool, shown
+- When enabled, Warp has **no 5h/weekly windows at all** — it's a monthly credit pool, shown
   as `used/limit (%)` plus a refresh countdown, not a percent-of-window.
 
 ## Running the server / web dashboard
@@ -91,6 +112,10 @@ Routes: `GET /usage`, `GET /runs`, `GET /resets`, `GET /status`, `GET /estimate[
 `GET /recommend[?taskProfile=...]`, `POST /manual` (body:
 `{provider, field, value, note?}`), and the dashboard itself at `GET /`
 (static files served from `public/`).
+
+`GET /status` includes the validated `enabledProviders` list in configured
+order. Disabled providers are absent from `/usage` and `/resets`; stored
+Codex reset-credit rows are not exposed when Codex is disabled.
 
 `bin/quota` / `bin/quota json` try the server first (`http://127.0.0.1:8787/usage`)
 and fall back to a direct one-shot collection if it's not running — so the
@@ -172,7 +197,7 @@ cheaper to recommend even when the all-models weekly window is tight.
 
 ### Warp: manual entry for add-on credits
 
-Warp's `AIRequestLimitInfo` plist key has no field for purchased add-on
+When Warp is enabled, its `AIRequestLimitInfo` plist key has no field for purchased add-on
 credits (Phase 0 confirmed this — neither the plist nor the GraphQL API
 expose it). Record your add-on balance manually after checking
 `warp://settings/billing`:
@@ -183,7 +208,7 @@ bin/quota manual set warp addon_credits 500 "purchased 2026-07-12"
 
 Manual entries show up under the provider's block in `quota` output and in
 the JSON report (`providers[].manualEntries`), each stamped with when you set
-it. There's no manual-entry mechanism for Codex or Anthropic — both have
+it. The CLI and HTTP API reject entries for disabled providers. There's no manual-entry mechanism for Codex or Anthropic — both have
 complete programmatic collectors.
 
 ### Stale / unavailable badges
@@ -271,7 +296,7 @@ Dark-mode "instrument panel" SPA (`public/index.html` + `styles.css` +
 files off the same server as the API). It reads `GET /usage` and re-polls
 every 30s client-side:
 
-- **Provider cards**: Codex and Anthropic get two radial arc gauges (5h,
+- **Provider cards**: enabled providers are rendered dynamically. Codex and Anthropic get two radial arc gauges (5h,
   weekly) with a reset countdown; Warp gets a linear pool bar (used/limit +
   refresh countdown) since it has no window semantics. Every card shows a
   data-freshness pill (`OK`/`STALE`/`UNAVAILABLE`), source, and data age.
@@ -280,7 +305,7 @@ every 30s client-side:
   (spent/limit + enabled badge + reset countdown) — both driven entirely by
   what `GET /usage` returns, so the card silently shows nothing extra when
   a provider reports none (e.g. once the Fable bucket expires).
-- **Recent-run ledger**: Codex and Anthropic cards also read `GET /runs` and
+- **Recent-run ledger**: enabled Codex and Anthropic cards also read `GET /runs` and
   show up to the 50 newest activity bursts from the local session logs. All
   returned runs remain available in a ledger that scrolls after roughly eight
   rows; the bound only prevents an unbounded archive scan and DOM on each
@@ -314,7 +339,7 @@ every 30s client-side:
   `recommend_model`-equivalent call against `GET /recommend` — shows the
   picked provider/model, the one-line reason, the token-range estimate, and
   alternates.
-- **Manual entry form**: embedded directly in the Warp card (Warp is the only
+- **Manual entry form**: embedded directly in the enabled Warp card (Warp is the only
   provider with a manual field — Codex and Anthropic are both API-driven).
   Same mechanism as `bin/quota manual set` (posts to `POST /manual`) — use it
   instead of the CLI to record Warp add-on credits from the dashboard.
@@ -378,7 +403,7 @@ their sign-off. Designed-but-not-built shape, for whoever picks this up:
   (see `src/estimation.ts` for the full calibration-provenance comment).
   Returns real structured data, no longer a stub.
 - `recommend_model({ taskProfile? })` — combines that estimate with live
-  `get_usage` headroom across all three providers and returns a ranked
+  `get_usage` headroom across enabled providers and returns a ranked
   provider+model suggestion with a one-line reason, alternates, and explicit
   warnings for any stale/unavailable provider (never silently dropped).
   Returns real structured data, no longer a stub. This is the tool the
@@ -491,7 +516,7 @@ bun run serve
 cp launchd/com.luis.quota-service.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.luis.quota-service.plist
 
-# Check it's up:
+# Check it's up (the response includes enabledProviders):
 curl http://127.0.0.1:8787/status
 
 # Stop / uninstall:
@@ -516,8 +541,8 @@ Logs land at `~/.quota-service/quota-service.{out,err}.log`.
   architecture notes (T3C runs the real binaries against the real home dirs)
   but not observed directly in this session — see manual verification note
   above.
-- Nothing was left in a stale/unavailable state due to being blocked — all
-  three collectors are live and returning `[OK]` as of this writing.
+- Nothing was left in a stale/unavailable state due to being blocked when
+  this section was written; current output depends on the enabled provider list.
 - **Estimation calibration is v1.5, not full v2** — `src/estimation.ts`'s
   token-range bounds were sanity-checked against real per-session token
   totals from 119 Claude Code transcripts

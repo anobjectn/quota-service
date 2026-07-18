@@ -3,11 +3,10 @@
 // stale/unavailable semantics.
 
 import type { Database } from "bun:sqlite";
+import { ENABLED_PROVIDERS } from "./config";
 import { getLatestResetCredits, getLatestSnapshot, getManualEntries } from "./db";
 import { POLL_FLOORS_MS } from "./collect";
 import type { CollectorResult, ManualEntry, Provider, ResetCreditsResult } from "./types";
-
-const PROVIDERS: Provider[] = ["codex", "anthropic", "warp"];
 
 /** A provider whose data is older than this multiple of its poll floor is
  * presented as "stale" regardless of what the last collector run reported —
@@ -31,10 +30,13 @@ export interface UsageReport {
   providers: ProviderReport[];
 }
 
-export function buildUsageReport(db: Database): UsageReport {
+export function buildUsageReport(
+  db: Database,
+  providers: readonly Provider[] = ENABLED_PROVIDERS,
+): UsageReport {
   const generatedAt = Date.now();
-  const providers = PROVIDERS.map((provider) => buildProviderReport(db, provider, generatedAt));
-  return { generatedAt, providers };
+  const reports = providers.map((provider) => buildProviderReport(db, provider, generatedAt));
+  return { generatedAt, providers: reports };
 }
 
 function buildProviderReport(db: Database, provider: Provider, now: number): ProviderReport {
@@ -103,11 +105,14 @@ export interface ResetsReport {
   } | null;
 }
 
-export function buildResetsReport(db: Database): ResetsReport {
+export function buildResetsReport(
+  db: Database,
+  providers: readonly Provider[] = ENABLED_PROVIDERS,
+): ResetsReport {
   const generatedAt = Date.now();
   const windows: ResetsReport["windows"] = [];
   const pools: ResetsReport["pools"] = [];
-  for (const provider of PROVIDERS) {
+  for (const provider of providers) {
     const latest = getLatestSnapshot(db, provider);
     if (!latest?.snapshot) continue;
     if (latest.snapshot.kind === "window") {
@@ -138,7 +143,7 @@ export function buildResetsReport(db: Database): ResetsReport {
       });
     }
   }
-  const codexResetCredits = getLatestResetCredits(db, "codex");
+  const codexResetCredits = providers.includes("codex") ? getLatestResetCredits(db, "codex") : null;
   return {
     generatedAt,
     windows,

@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { requireEnabledProvider } from "./config";
 import { openDb, setManualEntry } from "./db";
 import { collectAll } from "./collect";
 import {
@@ -170,13 +171,16 @@ function cmdManualSet(args: string[]): void {
     console.error("usage: quota manual set <provider> <field> <value> [note...]");
     process.exit(1);
   }
-  if (!["codex", "anthropic", "warp"].includes(provider)) {
-    console.error(`unknown provider "${provider}"`);
+  let enabledProvider: Provider;
+  try {
+    enabledProvider = requireEnabledProvider(provider);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
   const db = openDb();
   setManualEntry(db, {
-    provider: provider as Provider,
+    provider: enabledProvider,
     field,
     value,
     note: noteParts.length > 0 ? noteParts.join(" ") : null,
@@ -252,7 +256,7 @@ function printHelp(): void {
   console.log(`quota — personal usage/quota CLI
 
 Usage:
-  quota                 human-readable usage table (all providers)
+  quota                 human-readable usage table (enabled providers)
   quota json             machine-readable usage report
   quota resets           human-readable natural resets + banked reset credits
   quota resets json      machine-readable resets report

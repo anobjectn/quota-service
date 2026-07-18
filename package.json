@@ -6,7 +6,9 @@
   "scripts": {
     "serve": "bun run src/server.ts",
     "quota": "bun run src/cli.ts",
-    "mcp": "bun run src/mcp.ts"
+    "mcp": "bun run src/mcp.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

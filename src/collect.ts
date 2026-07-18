@@ -2,6 +2,7 @@
 // provider's polite-polling floor. Used by both the on-demand CLI
 // (collect-on-query) and the foreground server's poll loop.
 
+import { ENABLED_PROVIDERS } from "./config";
 import type { Database } from "bun:sqlite";
 import { getLatestSnapshot, saveResetCredits, saveSnapshot } from "./db";
 import { collectAnthropic, ANTHROPIC_POLL_FLOOR_MS } from "./collectors/anthropic";
@@ -121,11 +122,24 @@ export async function collectWarpAndSave(db: Database): Promise<CollectorResult>
 export async function collectAll(
   db: Database,
   opts: { force?: boolean } = {},
-): Promise<Record<Provider, CollectorResult>> {
-  const [codex, anthropic, warp] = await Promise.all([
-    collectCodexAndSave(db, opts),
-    collectAnthropicAndSave(db, opts),
-    collectWarpAndSave(db),
-  ]);
-  return { codex, anthropic, warp };
+  providers: readonly Provider[] = ENABLED_PROVIDERS,
+  runners: CollectorRunners = DEFAULT_COLLECTOR_RUNNERS,
+): Promise<Partial<Record<Provider, CollectorResult>>> {
+  const entries = await Promise.all(
+    providers.map(async (provider) => [provider, await runners[provider](db, opts)] as const),
+  );
+  return Object.fromEntries(entries) as Partial<Record<Provider, CollectorResult>>;
 }
+
+export type CollectorRunner = (
+  db: Database,
+  opts: { force?: boolean },
+) => Promise<CollectorResult>;
+
+export type CollectorRunners = Record<Provider, CollectorRunner>;
+
+const DEFAULT_COLLECTOR_RUNNERS: CollectorRunners = {
+  codex: collectCodexAndSave,
+  anthropic: collectAnthropicAndSave,
+  warp: (db) => collectWarpAndSave(db),
+};

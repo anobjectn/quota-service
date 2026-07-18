@@ -4,12 +4,14 @@
 // Runs foreground with a poll loop while alive (on-demand + foreground mode
 // per Plan B's current operational stance — no launchd load yet).
 
+import { requireEnabledProvider } from "./config";
 import { openDb } from "./db";
 import { collectAll } from "./collect";
 import { buildResetsReport, buildUsageReport } from "./present";
 import { estimateCost, isValidTaskProfile, recommendModel } from "./estimation";
 import { join } from "node:path";
 import { collectRunHistory } from "./run-history";
+import { buildServiceStatus } from "./status";
 
 function parseArgs(argv: string[]): { host: string; port: number; pollMs: number } {
   let host = "127.0.0.1";
@@ -103,7 +105,7 @@ const server = Bun.serve({
       return Response.json(await collectRunHistory(url.searchParams.get("refresh") === "1"));
     }
     if (url.pathname === "/status") {
-      return Response.json({ ok: true, uptimeMs: process.uptime() * 1000, pollMs });
+      return Response.json(buildServiceStatus(pollMs));
     }
     if (url.pathname === "/estimate") {
       const raw = taskProfileParam(url);
@@ -123,12 +125,10 @@ const server = Bun.serve({
         if (!body.provider || !body.field || body.value === undefined) {
           return Response.json({ ok: false, error: "provider, field, value are required" }, { status: 400 });
         }
-        if (!["codex", "anthropic", "warp"].includes(body.provider)) {
-          return Response.json({ ok: false, error: `unknown provider "${body.provider}"` }, { status: 400 });
-        }
+        const provider = requireEnabledProvider(body.provider);
         const { setManualEntry } = await import("./db");
         setManualEntry(db, {
-          provider: body.provider as "codex" | "anthropic" | "warp",
+          provider,
           field: body.field,
           value: String(body.value),
           note: body.note ?? null,

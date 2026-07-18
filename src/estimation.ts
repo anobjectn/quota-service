@@ -277,11 +277,14 @@ export function recommendModel(taskProfile: TaskProfile, usage: UsageReport): Re
   }
 
   function candidatesForTier(tier: ModelTier): RecommendationCandidate[] {
-    return ROSTER.filter((r) => r.tier === tier).map((r) => {
-      const h =
-        r.provider === "anthropic" && tier === "frontier"
-          ? computeAnthropicFrontierHeadroom(usage.providers.find((p) => p.provider === "anthropic")!)
-          : headroomByProvider.find((x) => x.provider === r.provider)!;
+    return ROSTER.filter(
+      (r) => r.tier === tier && usage.providers.some((provider) => provider.provider === r.provider),
+    ).flatMap((r) => {
+      const report = usage.providers.find((provider) => provider.provider === r.provider);
+      const h = r.provider === "anthropic" && tier === "frontier" && report
+        ? computeAnthropicFrontierHeadroom(report)
+        : headroomByProvider.find((candidate) => candidate.provider === r.provider);
+      if (!h) return [];
       return {
         provider: r.provider,
         tier: r.tier,

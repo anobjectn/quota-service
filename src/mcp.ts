@@ -8,6 +8,7 @@
 // agent always gets current-ish data without the server needing to be
 // running continuously. estimate_cost / recommend_model are Phase 4 stubs.
 
+import { ENABLED_PROVIDERS } from "./config";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -28,7 +29,7 @@ server.registerTool(
   {
     title: "Get current quota usage",
     description:
-      "Returns current usage for Codex, Anthropic (Claude Code), and Warp: 5h/weekly window percentages, Warp's monthly pool, data source, and data age. Every provider reports an explicit ok/stale/unavailable status.",
+      `Returns current usage for enabled providers (${ENABLED_PROVIDERS.join(", ")}): window/pool usage, data source, and data age. Every enabled provider reports an explicit ok/stale/unavailable status.`,
     inputSchema: {},
   },
   async () => {
@@ -91,7 +92,7 @@ server.registerTool(
   {
     title: "Recommend a model/provider given live headroom",
     description:
-      "Combines the task-profile token estimate with live get_usage headroom across Codex/Anthropic/Warp and returns a ranked provider+model suggestion with a one-line reason. Never silently drops a stale/unavailable provider — it's flagged in the response instead.",
+      "Combines the task-profile token estimate with live get_usage headroom across enabled providers and returns a ranked provider+model suggestion with a one-line reason. Never silently drops a stale/unavailable enabled provider — it is flagged in the response instead.",
     inputSchema: {
       taskProfile: z
         .enum(TASK_PROFILE_ENUM)
