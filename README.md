@@ -2,7 +2,7 @@
 
 A local-first, read-only usage and quota tracker for Codex, Claude Code, and optional Warp usage. It provides a command-line report, a local web dashboard, and an MCP server for agents that need current quota context.
 
-Use it alongside [AI Usage Observatory](https://github.com/anobjectn/ai-usage-observatory) when you want local provider-quota and usage signals available to your broader AI-usage workflow.
+Use it alongside [AI Usage Observatory](https://github.com/anobjectn/ai-usage-observatory) when you want local provider-quota and usage signals available to your broader AI-usage workflow, but standalone it provides a bare-bones interface
 
 ![Quota Service dashboard](docs/images/dashboard.png)
 
