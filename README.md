@@ -4,6 +4,8 @@ A local-first, read-only usage and quota tracker for Codex, Claude Code, and opt
 
 Use it alongside [AI Usage Observatory](https://github.com/anobjectn/ai-usage-observatory) when you want local provider-quota and usage signals available to your broader AI-usage workflow.
 
+![Quota Service dashboard](docs/images/dashboard.png)
+
 ## What it provides
 
 - Live quota collection for Codex and Anthropic; optional manual Warp credit tracking.
