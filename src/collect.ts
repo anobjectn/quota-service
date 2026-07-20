@@ -126,9 +126,35 @@ export async function collectAll(
   runners: CollectorRunners = DEFAULT_COLLECTOR_RUNNERS,
 ): Promise<Partial<Record<Provider, CollectorResult>>> {
   const entries = await Promise.all(
-    providers.map(async (provider) => [provider, await runners[provider](db, opts)] as const),
+    providers.map(async (provider) => [
+      provider,
+      await runProviderOnce(provider, () => runners[provider](db, opts)),
+    ] as const),
   );
   return Object.fromEntries(entries) as Partial<Record<Provider, CollectorResult>>;
+}
+
+// The poll loop and collect-on-query routes can notice the same stale row at
+// the same time. Share that provider's active run so they do not make duplicate
+// network requests or persist nearly-identical snapshots a millisecond apart.
+const IN_FLIGHT_COLLECTIONS = new Map<Provider, Promise<CollectorResult>>();
+
+function runProviderOnce(
+  provider: Provider,
+  run: () => Promise<CollectorResult>,
+): Promise<CollectorResult> {
+  const active = IN_FLIGHT_COLLECTIONS.get(provider);
+  if (active) return active;
+
+  const pending = Promise.resolve()
+    .then(run)
+    .finally(() => {
+      if (IN_FLIGHT_COLLECTIONS.get(provider) === pending) {
+        IN_FLIGHT_COLLECTIONS.delete(provider);
+      }
+    });
+  IN_FLIGHT_COLLECTIONS.set(provider, pending);
+  return pending;
 }
 
 export type CollectorRunner = (

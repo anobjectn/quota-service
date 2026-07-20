@@ -65,7 +65,10 @@ export function openDb(path: string = resolveDbPath()): Database {
 export function saveSnapshot(db: Database, result: CollectorResult): void {
   db.run(
     `INSERT INTO snapshots (provider, status, source, data_as_of, captured_at, snapshot_json, error)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+     SELECT ?, ?, ?, ?, ?, ?, ?
+     WHERE NOT EXISTS (
+       SELECT 1 FROM snapshots WHERE provider = ? AND captured_at = ?
+     )`,
     [
       result.provider,
       result.status,
@@ -74,6 +77,8 @@ export function saveSnapshot(db: Database, result: CollectorResult): void {
       result.capturedAt,
       result.snapshot ? JSON.stringify(result.snapshot) : null,
       result.error ?? null,
+      result.provider,
+      result.capturedAt,
     ],
   );
 }

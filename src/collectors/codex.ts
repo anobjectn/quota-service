@@ -9,7 +9,7 @@ const SESSIONS_DIRS = [
   join(CODEX_HOME, "archived_sessions"),
 ];
 
-interface RateLimitsPayload {
+export interface RateLimitsPayload {
   limit_id?: string;
   primary?: { used_percent: number; window_minutes: number; resets_at: number } | null;
   secondary?: { used_percent: number; window_minutes: number; resets_at: number } | null;
@@ -65,6 +65,9 @@ interface FoundRateLimits {
   timestamp: string;
 }
 
+const FIVE_HOUR_MAX_SECONDS = 6 * 3600; // classify windows <= 6h as the 5h window
+const WEEKLY_MIN_SECONDS = 3 * 24 * 3600; // classify windows >= 3d as the weekly window
+
 async function findLatestRateLimits(): Promise<FoundRateLimits | null> {
   // Check a handful of the most-recently-modified rollout files across both
   // dirs; the newest event with a rate_limits block wins.
@@ -100,14 +103,32 @@ async function findLatestRateLimits(): Promise<FoundRateLimits | null> {
   return best;
 }
 
-function toWindowSnapshot(rl: RateLimitsPayload): WindowSnapshot {
+function classifyFileWindows(rl: RateLimitsPayload): {
+  fiveHour: NonNullable<RateLimitsPayload["primary"]> | null;
+  weekly: NonNullable<RateLimitsPayload["primary"]> | null;
+} {
+  const windows = [rl.primary, rl.secondary].filter(
+    (window): window is NonNullable<typeof window> => window != null,
+  );
+  let fiveHour: NonNullable<RateLimitsPayload["primary"]> | null = null;
+  let weekly: NonNullable<RateLimitsPayload["primary"]> | null = null;
+  for (const window of windows) {
+    const durationSeconds = window.window_minutes * 60;
+    if (durationSeconds <= FIVE_HOUR_MAX_SECONDS) fiveHour = window;
+    else if (durationSeconds >= WEEKLY_MIN_SECONDS) weekly = window;
+  }
+  return { fiveHour, weekly };
+}
+
+export function toWindowSnapshotFromFile(rl: RateLimitsPayload): WindowSnapshot {
+  const { fiveHour, weekly } = classifyFileWindows(rl);
   return {
     kind: "window",
-    fiveHour: rl.primary
-      ? { usedPercent: rl.primary.used_percent, resetsAt: rl.primary.resets_at * 1000 }
+    fiveHour: fiveHour
+      ? { usedPercent: fiveHour.used_percent, resetsAt: fiveHour.resets_at * 1000 }
       : null,
-    weekly: rl.secondary
-      ? { usedPercent: rl.secondary.used_percent, resetsAt: rl.secondary.resets_at * 1000 }
+    weekly: weekly
+      ? { usedPercent: weekly.used_percent, resetsAt: weekly.resets_at * 1000 }
       : null,
     extra: {
       planType: rl.plan_type ?? null,
@@ -139,7 +160,7 @@ export async function collectCodexFromFile(): Promise<CollectorResult> {
       source: "codex_file",
       dataAsOf: new Date(found.timestamp).getTime(),
       capturedAt,
-      snapshot: toWindowSnapshot(found.rateLimits),
+      snapshot: toWindowSnapshotFromFile(found.rateLimits),
     };
   } catch (err) {
     return {
@@ -182,13 +203,13 @@ const FETCH_TIMEOUT_MS = 10_000;
 // Window naming/order isn't trustworthy across accounts/states (this account's
 // live call returned only one populated window), so windows are classified by
 // their duration rather than by position.
-interface WhamWindow {
+export interface WhamWindow {
   used_percent: number;
   limit_window_seconds: number;
   reset_after_seconds: number;
   reset_at: number;
 }
-interface WhamUsageResponse {
+export interface WhamUsageResponse {
   plan_type?: string;
   rate_limit?: {
     allowed: boolean;
@@ -200,9 +221,6 @@ interface WhamUsageResponse {
   rate_limit_reset_credits?: { available_count: number };
   rate_limit_reached_type?: string | null;
 }
-
-const FIVE_HOUR_MAX_SECONDS = 6 * 3600; // classify windows <= 6h as the 5h window
-const WEEKLY_MIN_SECONDS = 3 * 24 * 3600; // classify windows >= 3d as the weekly window
 
 function classifyWhamWindows(rl: NonNullable<WhamUsageResponse["rate_limit"]>): {
   fiveHour: WhamWindow | null;
@@ -220,7 +238,7 @@ function classifyWhamWindows(rl: NonNullable<WhamUsageResponse["rate_limit"]>): 
   return { fiveHour, weekly };
 }
 
-function toWindowSnapshotFromWham(body: WhamUsageResponse): WindowSnapshot {
+export function toWindowSnapshotFromWham(body: WhamUsageResponse): WindowSnapshot {
   const rl = body.rate_limit;
   const { fiveHour, weekly } = rl
     ? classifyWhamWindows(rl)
@@ -281,6 +299,10 @@ export async function collectCodexFromApi(): Promise<CollectorResult> {
 
 async function degradeToFile(reason: string): Promise<CollectorResult> {
   const fileResult = await collectCodexFromFile();
+  return annotateFileFallback(fileResult, reason);
+}
+
+export function annotateFileFallback(fileResult: CollectorResult, reason: string): CollectorResult {
   return {
     ...fileResult,
     error: fileResult.error
