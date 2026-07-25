@@ -110,8 +110,8 @@ bun run serve
 
 Routes: `GET /usage`, `GET /runs`, `GET /resets`, `GET /status`, `GET /estimate[?taskProfile=...]`,
 `GET /recommend[?taskProfile=...]`, `POST /manual` (body:
-`{provider, field, value, note?}`), and the dashboard itself at `GET /`
-(static files served from `public/`).
+`{provider, field, value, note?}`), `POST /anthropic-web-import`, and the
+dashboard itself at `GET /` (static files served from `public/`).
 
 `GET /status` includes the validated `enabledProviders` list in configured
 order. Disabled providers are absent from `/usage` and `/resets`; stored
@@ -179,14 +179,26 @@ the temporary Fable window's ~1-week expiry), `modelWindows` for that key
 just stops appearing — no schema change, no crash, and the CLI/dashboard
 simply stop rendering that row.
 
-Usage credits are similarly first-class: `snapshot.usageCredits` is
+Monthly usage-credit spend is similarly first-class:
+`snapshot.usageCredits` is
 `{ enabled, spentAmount, limitAmount, currency, resetsAt }` in major currency
 units (already converted from the API's minor-unit `amount_minor` +
 `exponent`). The collector prefers the newer `spend` block and falls back to
-the legacy `extra_usage` block if `spend` is absent. This is a manual-style
-**fallback balance**, exactly like Warp's add-on credits — `recommend_model`
+the legacy `extra_usage` block if `spend` is absent. `recommend_model`
 surfaces it as a flagged note (`usageCreditsNote`) when enabled with a
 remaining balance, but never factors it into automated ranking or spending.
+
+Claude Web's **prepaid balance and promotional tranches are separate** from
+that monthly spend response. They come from authenticated web-session
+endpoints such as `…/prepaid/credits` and
+`…/overage_credit_grant?campaign=fable_transition`. The Claude Code OAuth
+token was tested against both and returned `403 account_session_invalid`, so
+the service does not store browser cookies or mislabel these figures as live
+OAuth data. The dashboard's Anthropic **Sources / Provenance** drawer provides
+a small import form for balance, promotion, campaign, expiry, auto-reload, and
+purchase terms. It stores one timestamped `claude_web_credit_snapshot` manual
+entry and exposes a normalized `providers[].anthropicWebCredits` object in
+`GET /usage`.
 
 `recommend_model`'s binding-constraint logic treats Anthropic's frontier tier
 (Fable 5) specially: the binding bucket is whichever of 5h / all-models
@@ -208,8 +220,9 @@ bin/quota manual set warp addon_credits 500 "purchased 2026-07-12"
 
 Manual entries show up under the provider's block in `quota` output and in
 the JSON report (`providers[].manualEntries`), each stamped with when you set
-it. The CLI and HTTP API reject entries for disabled providers. There's no manual-entry mechanism for Codex or Anthropic — both have
-complete programmatic collectors.
+it. The CLI and HTTP API reject entries for disabled providers. Anthropic's
+quota windows and monthly spend remain programmatic; only its web-session-only
+prepaid-credit fields use the structured import described above.
 
 ### Stale / unavailable badges
 

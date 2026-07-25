@@ -7,6 +7,9 @@ A local-first, read-only usage and quota tracker for Codex, Claude Code, and opt
 - Live quota collection for Codex and Anthropic; optional manual Warp credit tracking.
 - A CLI for usage, reset windows, cost estimates, and model recommendations.
 - An MCP server exposing the same live usage, reset, estimation, and recommendation context to agents.
+- A compact credit ledger and expandable Sources / Provenance view that keeps
+  live provider data, imported Claude Web credit details, and local run
+  telemetry visibly distinct.
 - A localhost dashboard and JSON endpoints.
 - A local SQLite history of collected snapshots.
 

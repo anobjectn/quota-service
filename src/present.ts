@@ -6,7 +6,13 @@ import type { Database } from "bun:sqlite";
 import { ENABLED_PROVIDERS } from "./config";
 import { getLatestResetCredits, getLatestSnapshot, getManualEntries } from "./db";
 import { POLL_FLOORS_MS } from "./collect";
-import type { CollectorResult, ManualEntry, Provider, ResetCreditsResult } from "./types";
+import type {
+  AnthropicWebCredits,
+  CollectorResult,
+  ManualEntry,
+  Provider,
+  ResetCreditsResult,
+} from "./types";
 
 /** A provider whose data is older than this multiple of its poll floor is
  * presented as "stale" regardless of what the last collector run reported —
@@ -23,6 +29,9 @@ export interface ProviderReport {
   snapshot: CollectorResult["snapshot"];
   error?: string;
   manualEntries: ManualEntry[];
+  /** Present only for Anthropic when the user has imported the Claude
+   * Web-only prepaid-credit snapshot. */
+  anthropicWebCredits?: AnthropicWebCredits | null;
 }
 
 export interface UsageReport {
@@ -42,6 +51,9 @@ export function buildUsageReport(
 function buildProviderReport(db: Database, provider: Provider, now: number): ProviderReport {
   const latest = getLatestSnapshot(db, provider);
   const manualEntries = getManualEntries(db, provider);
+  const anthropicWebCredits = provider === "anthropic"
+    ? parseAnthropicWebCredits(manualEntries.find((entry) => entry.field === "claude_web_credit_snapshot"))
+    : undefined;
   if (!latest) {
     return {
       provider,
@@ -52,6 +64,7 @@ function buildProviderReport(db: Database, provider: Provider, now: number): Pro
       snapshot: null,
       error: "no data collected yet",
       manualEntries,
+      anthropicWebCredits,
     };
   }
   const dataAgeMs = latest.dataAsOf != null ? now - latest.dataAsOf : null;
@@ -76,7 +89,74 @@ function buildProviderReport(db: Database, provider: Provider, now: number): Pro
       ? `collector last ran ${Math.round(collectorAgeMs / 1000)}s ago, exceeding ${STALE_AGE_MULTIPLIER}x the ${provider} poll floor (${Math.round(floorMs! / 1000)}s) — poll loop may be stalled`
       : latest.error,
     manualEntries,
+    anthropicWebCredits,
   };
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function timestamp(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseAnthropicWebCredits(entry: ManualEntry | undefined): AnthropicWebCredits | null {
+  if (!entry) return null;
+  try {
+    const raw = JSON.parse(entry.value) as Record<string, unknown>;
+    const promotionalTranches = Array.isArray(raw.promotionalTranches)
+      ? raw.promotionalTranches.flatMap((value) => {
+          if (!value || typeof value !== "object") return [];
+          const tranche = value as Record<string, unknown>;
+          const remainingAmount = finiteNumber(tranche.remainingAmount);
+          if (remainingAmount === null) return [];
+          return [{
+            remainingAmount,
+            grantedAmount: finiteNumber(tranche.grantedAmount),
+            expiresAt: timestamp(tranche.expiresAt),
+          }];
+        })
+      : [];
+    const rawCampaign = raw.campaign && typeof raw.campaign === "object"
+      ? raw.campaign as Record<string, unknown>
+      : null;
+    const rawPurchases = raw.purchases && typeof raw.purchases === "object"
+      ? raw.purchases as Record<string, unknown>
+      : null;
+    return {
+      source: "claude_web_manual",
+      capturedAt: timestamp(raw.capturedAt) ?? entry.updatedAt,
+      updatedAt: entry.updatedAt,
+      currentBalance: finiteNumber(raw.currentBalance),
+      balanceCredits: finiteNumber(raw.balanceCredits),
+      currency: typeof raw.currency === "string" ? raw.currency : "USD",
+      autoReloadEnabled: typeof raw.autoReloadEnabled === "boolean" ? raw.autoReloadEnabled : null,
+      nextExpiresAt: timestamp(raw.nextExpiresAt),
+      promotionalTranches,
+      campaign: rawCampaign && typeof rawCampaign.id === "string"
+        ? {
+            id: rawCampaign.id,
+            granted: typeof rawCampaign.granted === "boolean" ? rawCampaign.granted : null,
+            amount: finiteNumber(rawCampaign.amount),
+            expiresAt: timestamp(rawCampaign.expiresAt),
+          }
+        : null,
+      purchases: rawPurchases
+        ? {
+            purchasedThisMonthAmount: finiteNumber(rawPurchases.purchasedThisMonthAmount),
+            monthlyCapAmount: finiteNumber(rawPurchases.monthlyCapAmount),
+            resetsAt: timestamp(rawPurchases.resetsAt),
+            maxDiscountPercent: finiteNumber(rawPurchases.maxDiscountPercent),
+          }
+        : null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export interface ResetsReport {

@@ -5,7 +5,7 @@
 // per Plan B's current operational stance — no launchd load yet).
 
 import { requireEnabledProvider } from "./config";
-import { openDb } from "./db";
+import { openDb, setManualEntry } from "./db";
 import { collectAll } from "./collect";
 import { buildResetsReport, buildUsageReport } from "./present";
 import { estimateCost, isValidTaskProfile, recommendModel } from "./estimation";
@@ -74,6 +74,57 @@ function taskProfileParam(url: URL): string | undefined {
   return url.searchParams.get("taskProfile") ?? url.searchParams.get("profile") ?? undefined;
 }
 
+function optionalNumber(value: unknown, field: string): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`${field} must be a non-negative number`);
+  return parsed;
+}
+
+function optionalTimestamp(value: unknown, field: string): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = typeof value === "number" ? value : Date.parse(String(value));
+  if (!Number.isFinite(parsed)) throw new Error(`${field} must be a valid date`);
+  return parsed;
+}
+
+/** Normalize the intentionally small, user-editable Claude Web import shape.
+ * This route never accepts browser cookies or account-session credentials. */
+function normalizeAnthropicWebImport(body: Record<string, unknown>): Record<string, unknown> {
+  const promoRemaining = optionalNumber(body.promoRemaining, "promoRemaining");
+  const promoGranted = optionalNumber(body.promoGranted, "promoGranted");
+  const promoExpiresAt = optionalTimestamp(body.promoExpiresAt, "promoExpiresAt");
+  const campaignId = typeof body.campaignId === "string" && body.campaignId.trim()
+    ? body.campaignId.trim()
+    : null;
+  return {
+    schemaVersion: 1,
+    capturedAt: optionalTimestamp(body.capturedAt, "capturedAt") ?? Date.now(),
+    currentBalance: optionalNumber(body.currentBalance, "currentBalance"),
+    balanceCredits: optionalNumber(body.balanceCredits, "balanceCredits"),
+    currency: typeof body.currency === "string" && body.currency.trim() ? body.currency.trim().toUpperCase() : "USD",
+    autoReloadEnabled: typeof body.autoReloadEnabled === "boolean" ? body.autoReloadEnabled : null,
+    nextExpiresAt: optionalTimestamp(body.nextExpiresAt, "nextExpiresAt") ?? promoExpiresAt,
+    promotionalTranches: promoRemaining === null
+      ? []
+      : [{ remainingAmount: promoRemaining, grantedAmount: promoGranted, expiresAt: promoExpiresAt }],
+    campaign: campaignId
+      ? {
+          id: campaignId,
+          granted: typeof body.campaignGranted === "boolean" ? body.campaignGranted : null,
+          amount: optionalNumber(body.campaignAmount, "campaignAmount") ?? promoGranted,
+          expiresAt: optionalTimestamp(body.campaignExpiresAt, "campaignExpiresAt") ?? promoExpiresAt,
+        }
+      : null,
+    purchases: {
+      purchasedThisMonthAmount: optionalNumber(body.purchasedThisMonthAmount, "purchasedThisMonthAmount"),
+      monthlyCapAmount: optionalNumber(body.monthlyCapAmount, "monthlyCapAmount"),
+      resetsAt: optionalTimestamp(body.purchasesResetAt, "purchasesResetAt"),
+      maxDiscountPercent: optionalNumber(body.maxDiscountPercent, "maxDiscountPercent"),
+    },
+  };
+}
+
 async function serveStatic(pathname: string): Promise<Response> {
   const rel = pathname === "/" || pathname === "" ? "/index.html" : pathname;
   const filePath = join(PUBLIC_DIR, rel);
@@ -126,7 +177,6 @@ const server = Bun.serve({
           return Response.json({ ok: false, error: "provider, field, value are required" }, { status: 400 });
         }
         const provider = requireEnabledProvider(body.provider);
-        const { setManualEntry } = await import("./db");
         setManualEntry(db, {
           provider,
           field: body.field,
@@ -134,6 +184,22 @@ const server = Bun.serve({
           note: body.note ?? null,
         });
         return Response.json({ ok: true });
+      } catch (err) {
+        return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 400 });
+      }
+    }
+    if (url.pathname === "/anthropic-web-import" && req.method === "POST") {
+      try {
+        requireEnabledProvider("anthropic");
+        const body = (await req.json()) as Record<string, unknown>;
+        const snapshot = normalizeAnthropicWebImport(body);
+        setManualEntry(db, {
+          provider: "anthropic",
+          field: "claude_web_credit_snapshot",
+          value: JSON.stringify(snapshot),
+          note: "User-imported from Claude Settings → Usage; web-session endpoints are not accessible to Claude Code OAuth",
+        });
+        return Response.json({ ok: true, snapshot });
       } catch (err) {
         return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 400 });
       }
@@ -147,7 +213,7 @@ const server = Bun.serve({
 
 console.log(`quota-service listening on http://${server.hostname}:${server.port}`);
 console.log(`  polling every ${Math.round(pollMs / 1000)}s (respects per-provider poll floors)`);
-console.log(`  routes: GET /usage  GET /runs  GET /resets  GET /status  GET /estimate  GET /recommend  POST /manual`);
+console.log(`  routes: GET /usage  GET /runs  GET /resets  GET /status  GET /estimate  GET /recommend  POST /manual  POST /anthropic-web-import`);
 console.log(`  dashboard: http://${server.hostname}:${server.port}/`);
 if (host === "127.0.0.1" || host === "localhost") {
   console.log(`  bound to localhost only; pass --host <tailnet-ip> to expose on the tailnet`);

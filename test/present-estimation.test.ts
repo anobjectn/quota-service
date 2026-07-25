@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { saveResetCredits, saveSnapshot } from "../src/db";
+import { saveResetCredits, saveSnapshot, setManualEntry } from "../src/db";
 import { recommendModel } from "../src/estimation";
 import { buildResetsReport, buildUsageReport, type ProviderReport, type UsageReport } from "../src/present";
 import type { CollectorResult, Provider } from "../src/types";
@@ -92,6 +92,53 @@ test("resets suppress stored Codex reset credits when Codex is disabled", () => 
   });
 
   expect(buildResetsReport(db, ["warp"]).codexBankedResetCredits).toBeNull();
+  db.close();
+});
+
+test("usage exposes imported Claude Web credits as structured, separately timestamped data", () => {
+  const db = testDb();
+  saveSnapshot(db, snapshot("anthropic"));
+  setManualEntry(db, {
+    provider: "anthropic",
+    field: "claude_web_credit_snapshot",
+    value: JSON.stringify({
+      capturedAt: "2026-07-25T04:30:00Z",
+      currentBalance: 84.97,
+      balanceCredits: 84,
+      currency: "USD",
+      autoReloadEnabled: false,
+      nextExpiresAt: "2026-09-19T00:00:00Z",
+      promotionalTranches: [{
+        remainingAmount: 84.96,
+        grantedAmount: 100,
+        expiresAt: "2026-09-19T00:00:00Z",
+      }],
+      campaign: {
+        id: "fable_transition",
+        granted: true,
+        amount: 100,
+        expiresAt: "2026-09-19T00:00:00Z",
+      },
+      purchases: {
+        purchasedThisMonthAmount: 0,
+        monthlyCapAmount: 2000,
+        resetsAt: "2026-08-01T00:00:00Z",
+        maxDiscountPercent: 30,
+      },
+    }),
+    note: "Claude Web",
+  });
+
+  const web = buildUsageReport(db, ["anthropic"]).providers[0]!.anthropicWebCredits;
+  expect(web?.source).toBe("claude_web_manual");
+  expect(web?.currentBalance).toBe(84.97);
+  expect(web?.promotionalTranches[0]).toEqual({
+    remainingAmount: 84.96,
+    grantedAmount: 100,
+    expiresAt: Date.parse("2026-09-19T00:00:00Z"),
+  });
+  expect(web?.campaign?.id).toBe("fable_transition");
+  expect(web?.purchases?.maxDiscountPercent).toBe(30);
   db.close();
 });
 

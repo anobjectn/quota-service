@@ -33,6 +33,38 @@ export interface UsageCredits {
   resetsAt: number | null;
 }
 
+/** Claude Web-only prepaid-credit details. Claude Code's OAuth token cannot
+ * read these endpoints, so this is an explicitly user-imported snapshot with
+ * its own timestamp and provenance rather than being presented as live API
+ * data. */
+export interface AnthropicWebCredits {
+  source: "claude_web_manual";
+  capturedAt: number;
+  updatedAt: number;
+  currentBalance: number | null;
+  balanceCredits: number | null;
+  currency: string;
+  autoReloadEnabled: boolean | null;
+  nextExpiresAt: number | null;
+  promotionalTranches: Array<{
+    remainingAmount: number;
+    grantedAmount: number | null;
+    expiresAt: number | null;
+  }>;
+  campaign: {
+    id: string;
+    granted: boolean | null;
+    amount: number | null;
+    expiresAt: number | null;
+  } | null;
+  purchases: {
+    purchasedThisMonthAmount: number | null;
+    monthlyCapAmount: number | null;
+    resetsAt: number | null;
+    maxDiscountPercent: number | null;
+  } | null;
+}
+
 export interface WindowSnapshot {
   kind: "window";
   fiveHour: WindowQuota | null;

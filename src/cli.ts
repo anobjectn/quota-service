@@ -88,6 +88,16 @@ function renderProviderLine(p: ProviderReport): string[] {
   }
   if (p.manualEntries.length > 0) {
     for (const m of p.manualEntries) {
+      if (m.field === "claude_web_credit_snapshot" && p.anthropicWebCredits) {
+        const web = p.anthropicWebCredits;
+        const balance = web.currentBalance == null ? "?" : web.currentBalance.toFixed(2);
+        lines.push(`  Claude Web credits: $${balance} ${web.currency} — imported ${formatAge(Date.now() - web.capturedAt)}`);
+        for (const tranche of web.promotionalTranches) {
+          const expiry = tranche.expiresAt == null ? "unknown" : new Date(tranche.expiresAt).toISOString().slice(0, 10);
+          lines.push(`    promotional: $${tranche.remainingAmount.toFixed(2)} remaining, expires ${expiry}`);
+        }
+        continue;
+      }
       lines.push(`  manual: ${m.field} = ${m.value}${m.note ? ` (${m.note})` : ""} — set ${formatAge(Date.now() - m.updatedAt)}`);
     }
   }

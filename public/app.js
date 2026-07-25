@@ -16,6 +16,10 @@ const PURCHASE_LINKS = {
   anthropic: "https://claude.ai/settings/billing",
   warp: "warp://settings/billing",
 };
+const SUPPORT_LINKS = {
+  anthropicLimits: "https://support.claude.com/en/articles/11647753-understanding-usage-and-length-limits",
+  anthropicCredits: "https://support.claude.com/en/articles/12429409-extra-usage-for-paid-claude-plans",
+};
 
 function esc(value) {
   return String(value ?? "")
@@ -69,6 +73,22 @@ function fmtCountdown(ts) {
   if (hr < 48) return `${hr}h ${min % 60}m`;
   const days = Math.floor(hr / 24);
   return `${days}d ${hr % 24}h`;
+}
+
+function fmtDate(ts) {
+  if (ts == null) return "unknown";
+  // Provider expiry dates are account-wide calendar dates, commonly encoded
+  // as midnight UTC. Render in UTC so US time zones do not show the prior day.
+  return new Date(ts).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+}
+
+function fmtMoney(amount, currency = "USD") {
+  if (amount == null) return "—";
+  try {
+    return new Intl.NumberFormat([], { style: "currency", currency }).format(amount);
+  } catch {
+    return `$${Number(amount).toFixed(2)}`;
+  }
 }
 
 function fmtTokens(value) {
@@ -153,6 +173,162 @@ function statusPill(status) {
   return `<span class="status-pill" data-status="${status}"><span class="dot"></span>${label}</span>`;
 }
 
+function renderCreditLedger(p) {
+  const credits = p.snapshot?.usageCredits;
+  const web = p.anthropicWebCredits;
+  if (!credits && !web) return "";
+
+  const monthlyPercent = credits?.limitAmount
+    ? Math.min(100, credits.spentAmount / credits.limitAmount * 100)
+    : null;
+  const promo = web?.promotionalTranches?.[0];
+  const campaignLabel = web?.campaign?.id === "fable_transition"
+    ? "Fable transition"
+    : web?.campaign?.id?.replaceAll("_", " ");
+  const importedAge = web ? fmtAge(Date.now() - web.capturedAt) : null;
+
+  return `<section class="credit-ledger" aria-label="Anthropic usage credits">
+    <div class="credit-ledger-head">
+      <div>
+        <span class="eyebrow">usage credits</span>
+        <strong>Spend &amp; balance</strong>
+      </div>
+      ${credits
+        ? `<span class="credits-badge ${credits.enabled ? "credits-badge-on" : "credits-badge-off"}">${credits.enabled ? "enabled" : "disabled"}</span>`
+        : ""}
+    </div>
+    <div class="credit-metrics">
+      ${credits ? `<div class="credit-metric">
+        <span>monthly spend</span>
+        <strong>${fmtMoney(credits.spentAmount, credits.currency)}</strong>
+        <small>of ${fmtMoney(credits.limitAmount, credits.currency)} cap${monthlyPercent == null ? "" : ` · ${monthlyPercent.toFixed(0)}%`}</small>
+      </div>` : ""}
+      <div class="credit-metric ${web ? "" : "is-missing"}">
+        <span>prepaid balance</span>
+        <strong>${web ? fmtMoney(web.currentBalance, web.currency) : "not imported"}</strong>
+        <small>${web ? `Claude Web · ${importedAge}` : "Web-session data; add it below"}</small>
+      </div>
+      ${promo ? `<div class="credit-metric credit-metric-promo">
+        <span>promotional credit</span>
+        <strong>${fmtMoney(promo.remainingAmount, web.currency)}</strong>
+        <small>expires ${fmtDate(promo.expiresAt)}</small>
+      </div>` : ""}
+    </div>
+    ${web ? `<div class="credit-context">
+      ${campaignLabel ? `<span class="campaign-tag">${esc(campaignLabel)}</span>` : ""}
+      ${web.campaign?.amount != null ? `<span>${fmtMoney(web.campaign.amount, web.currency)} granted</span>` : ""}
+      <span>auto-reload ${web.autoReloadEnabled == null ? "unknown" : web.autoReloadEnabled ? "on" : "off"}</span>
+      ${web.purchases?.maxDiscountPercent != null ? `<span>bundles up to ${web.purchases.maxDiscountPercent.toFixed(0)}% off</span>` : ""}
+    </div>` : ""}
+  </section>`;
+}
+
+function inputValue(value) {
+  return value == null ? "" : esc(value);
+}
+
+function dateInputValue(ts) {
+  return ts == null ? "" : new Date(ts).toISOString().slice(0, 10);
+}
+
+function renderAnthropicImportForm(web) {
+  const promo = web?.promotionalTranches?.[0];
+  return `<form class="claude-import-form manual-form" data-claude-import-form>
+    <div class="import-form-intro">
+      <strong>Update Claude Web snapshot</strong>
+      <span>Copy these figures from Claude Settings → Usage. No cookies or credentials are stored.</span>
+    </div>
+    <div class="import-grid">
+      <label class="manual-field"><span>Current balance</span><input type="number" min="0" step="0.01" name="currentBalance" value="${inputValue(web?.currentBalance)}" placeholder="84.97" /></label>
+      <label class="manual-field"><span>Promo remaining</span><input type="number" min="0" step="0.01" name="promoRemaining" value="${inputValue(promo?.remainingAmount)}" placeholder="84.96" /></label>
+      <label class="manual-field"><span>Original grant</span><input type="number" min="0" step="0.01" name="promoGranted" value="${inputValue(promo?.grantedAmount)}" placeholder="100.00" /></label>
+      <label class="manual-field"><span>Promo expires</span><input type="date" name="promoExpiresAt" value="${dateInputValue(promo?.expiresAt)}" /></label>
+    </div>
+    <details class="import-advanced">
+      <summary>Purchase and campaign details</summary>
+      <div class="import-grid">
+        <label class="manual-field"><span>Campaign</span><input name="campaignId" value="${inputValue(web?.campaign?.id)}" placeholder="fable_transition" /></label>
+        <label class="manual-field"><span>Purchased this month</span><input type="number" min="0" step="0.01" name="purchasedThisMonthAmount" value="${inputValue(web?.purchases?.purchasedThisMonthAmount)}" /></label>
+        <label class="manual-field"><span>Monthly purchase cap</span><input type="number" min="0" step="0.01" name="monthlyCapAmount" value="${inputValue(web?.purchases?.monthlyCapAmount)}" /></label>
+        <label class="manual-field"><span>Purchase reset</span><input type="date" name="purchasesResetAt" value="${dateInputValue(web?.purchases?.resetsAt)}" /></label>
+        <label class="manual-field"><span>Maximum discount %</span><input type="number" min="0" max="100" step="1" name="maxDiscountPercent" value="${inputValue(web?.purchases?.maxDiscountPercent)}" /></label>
+        <label class="manual-field manual-check"><input type="checkbox" name="autoReloadEnabled" ${web?.autoReloadEnabled ? "checked" : ""} /><span>Auto-reload enabled</span></label>
+      </div>
+    </details>
+    <div class="import-actions">
+      <button type="submit">Save snapshot</button>
+      <a href="https://claude.ai/new#settings/usage" target="_blank" rel="noopener">Open Claude Usage ↗</a>
+      <span class="manual-status" data-manual-status aria-live="polite"></span>
+    </div>
+  </form>`;
+}
+
+function renderProvenance(p) {
+  const extra = p.snapshot?.extra ?? {};
+  const captured = p.capturedAt == null ? "unknown" : fmtAge(Date.now() - p.capturedAt);
+  const isAnthropic = p.provider === "anthropic";
+  const isWarp = p.provider === "warp";
+  const rawLimits = isAnthropic && Array.isArray(extra.rawLimits) ? extra.rawLimits : null;
+  const liveDescription = isAnthropic
+    ? "Server-authoritative five-hour, weekly, scoped-limit, and monthly-spend data. The Claude Code OAuth token can read this endpoint."
+    : isWarp
+      ? "Local Warp preference data. It reports the plan pool and allowances but not purchased add-on balances."
+      : "Server-authoritative usage windows and banked-reset metadata, with local session data used only as a fallback.";
+  const liveEndpoint = isAnthropic
+    ? "api.anthropic.com/api/oauth/usage"
+    : isWarp ? "Warp AIRequestLimitInfo plist" : "chatgpt.com/backend-api/wham/usage";
+  const sourceCount = isAnthropic ? 3 : 2;
+
+  return `<details class="provenance">
+    <summary>
+      <span>Sources / Provenance</span>
+      <span class="provenance-count">${sourceCount} feeds</span>
+    </summary>
+    <div class="provenance-body">
+      <div class="source-row">
+        <span class="source-index">01</span>
+        <div>
+          <div class="source-title"><strong>Provider quota API</strong><span class="source-badge is-live">live</span></div>
+          <p>${liveDescription}</p>
+          <code>${liveEndpoint}</code>
+          <div class="source-links"><a href="/usage" target="_blank">service snapshot ↗</a><span>captured ${captured}</span></div>
+        </div>
+      </div>
+      ${isAnthropic ? `<div class="source-row">
+        <span class="source-index">02</span>
+        <div>
+          <div class="source-title"><strong>Claude Web credits</strong><span class="source-badge is-manual">imported</span></div>
+          <p>Prepaid balance, promotional tranches, campaign, expiry, auto-reload, and purchase terms. Claude Code OAuth was tested against these endpoints and rejected with <code>403 account_session_invalid</code>, so this snapshot stays explicitly separate from live quota data.</p>
+          <code>claude.ai/api/organizations/…/prepaid/credits</code>
+          <code>…/overage_credit_grant?campaign=fable_transition</code>
+          <div class="source-links">
+            <a href="https://claude.ai/new#settings/usage" target="_blank" rel="noopener">Claude Usage ↗</a>
+            <a href="${SUPPORT_LINKS.anthropicCredits}" target="_blank" rel="noopener">credit policy ↗</a>
+            ${p.anthropicWebCredits ? `<span>observed ${fmtAge(Date.now() - p.anthropicWebCredits.capturedAt)}</span>` : `<span>not yet imported</span>`}
+          </div>
+          ${renderAnthropicImportForm(p.anthropicWebCredits)}
+        </div>
+      </div>` : ""}
+      <div class="source-row">
+        <span class="source-index">${isAnthropic ? "03" : "02"}</span>
+        <div>
+          <div class="source-title"><strong>${isWarp ? "Manual add-on record" : "Local run telemetry"}</strong><span class="source-badge is-local">${isWarp ? "manual" : "local"}</span></div>
+          ${isWarp
+            ? `<p>User-maintained add-on balance, because Warp does not expose it in the local plan record.</p>`
+            : `<p>Recent token counts, models, effort, timing, and API-list-price equivalents. These logs explain activity, but provider-controlled quota percentages remain authoritative.</p>
+               <code>${isAnthropic ? "~/.claude/projects/**/*.jsonl" : "~/.codex/sessions/**/*.jsonl"}</code>
+               <div class="source-links"><a href="/runs?refresh=1" target="_blank">raw run report ↗</a></div>`}
+        </div>
+      </div>
+      ${rawLimits ? `<details class="raw-evidence">
+        <summary>Raw scoped-limit evidence</summary>
+        <pre>${esc(JSON.stringify(rawLimits, null, 2))}</pre>
+      </details>` : ""}
+      ${isAnthropic ? `<p class="provenance-note">Interpretation: the Fable promotional credit is monetary fallback capacity, not a separate model quota unless Anthropic also returns a scoped Fable entry in <code>limits[]</code>. <a href="${SUPPORT_LINKS.anthropicLimits}" target="_blank" rel="noopener">Usage-limit documentation ↗</a></p>` : ""}
+    </div>
+  </details>`;
+}
+
 function renderWindowCard(p) {
   const snap = p.snapshot;
   const fh = snap?.fiveHour;
@@ -211,18 +387,7 @@ function renderWindowCard(p) {
     modelWindowsHtml = `<div class="model-window-list">${rows}</div>`;
   }
 
-  // Usage credits — first-class field, rendered as a compact line.
-  const credits = snap?.usageCredits;
-  let creditsHtml = "";
-  if (credits) {
-    const badgeClass = credits.enabled ? "credits-badge-on" : "credits-badge-off";
-    const limitStr = credits.limitAmount != null ? credits.limitAmount.toFixed(2) : "?";
-    const resetStr = credits.resetsAt != null ? ` · resets ${fmtCountdown(credits.resetsAt)}` : "";
-    creditsHtml = `<div class="credits-line">
-      <span class="credits-badge ${badgeClass}">${credits.enabled ? "credits enabled" : "credits disabled"}</span>
-      <span class="credits-amount">$${credits.spentAmount.toFixed(2)} / $${limitStr} ${credits.currency}${resetStr}</span>
-    </div>`;
-  }
+  const creditsHtml = renderCreditLedger(p);
 
   return { gauges, chips, modelWindowsHtml, creditsHtml };
 }
@@ -301,6 +466,7 @@ function renderCard(p, runs) {
     : { gauges: `<p class="muted">no data collected yet</p>`, chips: "" };
 
   const manualChips = (p.manualEntries ?? [])
+    .filter((m) => m.field !== "claude_web_credit_snapshot")
     .map((m) => `<span class="info-chip">manual: ${m.field} = ${m.value}${m.note ? ` (${m.note})` : ""}</span>`)
     .join("");
 
@@ -310,7 +476,7 @@ function renderCard(p, runs) {
   const link = PURCHASE_LINKS[p.provider];
 
   return `
-    <article class="card" style="--card-accent: ${accentColor}; --card-accent-glow: ${accentGlow};">
+    <article class="card" data-provider="${esc(p.provider)}" style="--card-accent: ${accentColor}; --card-accent-glow: ${accentGlow};">
       <div class="card-head">
         <div class="card-title-group">
           <span class="card-title">${PROVIDER_LABEL[p.provider]}</span>
@@ -323,6 +489,7 @@ function renderCard(p, runs) {
       <div class="chip-row">${chips}${manualChips}</div>
       ${creditsHtml}
       ${note}
+      ${renderProvenance(p)}
       ${renderRunHistory(p.provider, runs, p.snapshot)}
       <div class="card-footer">
         <a class="purchase-link" href="${link}" target="_blank" rel="noopener">manage / purchase ↗</a>
@@ -409,17 +576,60 @@ document.getElementById("profile-row").addEventListener("click", (e) => {
   if (btn) selectProfile(btn.dataset.profile);
 });
 
-// ---------- manual entry form (lives inside the Warp card) ----------
+// ---------- user-maintained provider data ----------
+
+function optionalFormNumber(form, name) {
+  const raw = form.elements[name]?.value?.trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
 
 document.getElementById("cards").addEventListener("submit", async (e) => {
   const form = e.target.closest(".manual-form");
   if (!form) return;
   e.preventDefault();
-  const value = form.querySelector('input[name="value"]').value.trim();
-  const note = form.querySelector('input[name="note"]').value.trim();
-  const statusEl = form.parentElement.querySelector("[data-manual-status]");
+  const statusEl = form.querySelector("[data-manual-status]") ?? form.parentElement.querySelector("[data-manual-status]");
   statusEl.textContent = "Saving…";
   statusEl.removeAttribute("data-ok");
+
+  if (form.matches("[data-claude-import-form]")) {
+    const payload = {
+      capturedAt: Date.now(),
+      currentBalance: optionalFormNumber(form, "currentBalance"),
+      promoRemaining: optionalFormNumber(form, "promoRemaining"),
+      promoGranted: optionalFormNumber(form, "promoGranted"),
+      promoExpiresAt: form.elements.promoExpiresAt.value || null,
+      campaignId: form.elements.campaignId.value.trim() || null,
+      campaignGranted: form.elements.campaignId.value.trim() ? true : null,
+      campaignAmount: optionalFormNumber(form, "promoGranted"),
+      campaignExpiresAt: form.elements.promoExpiresAt.value || null,
+      autoReloadEnabled: form.elements.autoReloadEnabled.checked,
+      purchasedThisMonthAmount: optionalFormNumber(form, "purchasedThisMonthAmount"),
+      monthlyCapAmount: optionalFormNumber(form, "monthlyCapAmount"),
+      purchasesResetAt: form.elements.purchasesResetAt.value || null,
+      maxDiscountPercent: optionalFormNumber(form, "maxDiscountPercent"),
+    };
+    try {
+      const res = await fetch("/anthropic-web-import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json();
+      if (!res.ok || !body.ok) throw new Error(body.error ?? "unknown error");
+      statusEl.textContent = "Snapshot saved";
+      statusEl.dataset.ok = "true";
+      await loadUsage();
+    } catch (err) {
+      statusEl.textContent = `Failed: ${err.message ?? err}`;
+      statusEl.dataset.ok = "false";
+    }
+    return;
+  }
+
+  const value = form.querySelector('input[name="value"]').value.trim();
+  const note = form.querySelector('input[name="note"]').value.trim();
   try {
     const res = await fetch("/manual", {
       method: "POST",
