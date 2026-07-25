@@ -136,8 +136,11 @@ test("usage exposes imported Claude Web credits as structured, separately timest
     remainingAmount: 84.96,
     grantedAmount: 100,
     expiresAt: Date.parse("2026-09-19T00:00:00Z"),
+    expiresOn: "2026-09-19",
   });
+  expect(web?.nextExpiresOn).toBe("2026-09-19");
   expect(web?.campaign?.id).toBe("fable_transition");
+  expect(web?.campaign?.expiresOn).toBe("2026-09-19");
   expect(web?.purchases?.maxDiscountPercent).toBe(30);
   db.close();
 });

@@ -176,6 +176,41 @@ export function setManualEntry(
   );
 }
 
+/** Delete rows in a captured_at-indexed history table older than
+ * `now - retentionMs`, but always keep the most-recent row per provider so a
+ * provider that hasn't polled recently never loses its latest known state
+ * (that latest row is what every "getLatest*" read and the staleness rule
+ * depend on). Returns the number of rows deleted. */
+function pruneHistoryTable(db: Database, table: string, retentionMs: number, now: number): number {
+  const cutoff = now - retentionMs;
+  const result = db.run(
+    `DELETE FROM ${table}
+     WHERE captured_at < ?
+       AND id NOT IN (
+         SELECT id FROM (
+           SELECT id, ROW_NUMBER() OVER (PARTITION BY provider ORDER BY captured_at DESC) AS rn
+           FROM ${table}
+         ) WHERE rn = 1
+       )`,
+    [cutoff],
+  );
+  return result.changes;
+}
+
+/** Prune both history tables (`snapshots`, `reset_credits`) to the retention
+ * window. Best-effort at the call site (the poll loop guards it) — this only
+ * runs SQL and returns per-table deletion counts. */
+export function pruneHistory(
+  db: Database,
+  retentionMs: number,
+  now: number = Date.now(),
+): { snapshots: number; resetCredits: number } {
+  return {
+    snapshots: pruneHistoryTable(db, "snapshots", retentionMs, now),
+    resetCredits: pruneHistoryTable(db, "reset_credits", retentionMs, now),
+  };
+}
+
 export function getManualEntries(db: Database, provider: Provider): ManualEntry[] {
   const rows = db
     .query(

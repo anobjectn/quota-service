@@ -14,7 +14,11 @@ export type CollectorStatus = "ok" | "stale" | "unavailable";
 export type Provider = "codex" | "anthropic" | "warp";
 
 export interface WindowQuota {
-  /** 0-100 */
+  /** Percentage of the window consumed, on a 0–100 scale (NOT a 0–1 fraction).
+   * A future provider change that starts emitting a fraction would surface here
+   * as an obviously-wrong dial rather than a silent 100x error. Guaranteed
+   * finite: a non-finite provider value causes the window to be omitted/null
+   * upstream rather than propagating `NaN`. */
   usedPercent: number;
   /** unix ms epoch, or null if unknown */
   resetsAt: number | null;
@@ -25,8 +29,11 @@ export interface WindowQuota {
  * so presenters don't need to know the provider's wire shape. */
 export interface UsageCredits {
   enabled: boolean;
-  /** major currency units, e.g. dollars (already divided by the wire exponent) */
+  /** Major currency units, e.g. dollars (already divided by the wire exponent).
+   * Every monetary amount across this contract is in major units — never
+   * re-divide by an exponent. */
   spentAmount: number;
+  /** Major currency units (dollars), or null if the provider reports no cap. */
   limitAmount: number | null;
   currency: string;
   /** unix ms epoch, or null if the provider doesn't report a reset date */
@@ -41,24 +48,54 @@ export interface AnthropicWebCredits {
   source: "claude_web_manual";
   capturedAt: number;
   updatedAt: number;
+  /** Canonical spendable prepaid balance, in major currency units (dollars) —
+   * the "Current balance" line in Claude Settings → Usage. This is the total
+   * currently spendable across all sources (it includes any unexpired
+   * promotional credit). Consumers wanting "money the user can spend right now"
+   * should read this field. */
   currentBalance: number | null;
+  /**
+   * @deprecated Legacy duplicate with no distinct source in Claude's current
+   * usage UI — every visible balance maps to `currentBalance` or a
+   * `promotionalTranches[]` entry. Retained (and still accepted on import) only
+   * for backward compatibility; prefer `currentBalance`. If a future Claude UI
+   * introduces a genuinely separate non-dollar credit quantity, redocument this
+   * field then rather than reusing it silently.
+   */
   balanceCredits: number | null;
   currency: string;
   autoReloadEnabled: boolean | null;
+  /** unix ms epoch of the soonest credit expiry. For date-only imports this is
+   * UTC-midnight; read `nextExpiresOn` for the calendar-date representation. */
   nextExpiresAt: number | null;
+  /** `YYYY-MM-DD` (UTC) canonical calendar date for `nextExpiresAt` when the
+   * expiry is genuinely date-only (Claude Web credit expiries are calendar
+   * dates). Render verbatim; do NOT reapply a local timezone. null when unknown. */
+  nextExpiresOn: string | null;
   promotionalTranches: Array<{
+    /** Major currency units (dollars). */
     remainingAmount: number;
+    /** Major currency units (dollars), or null. */
     grantedAmount: number | null;
+    /** unix ms epoch (UTC-midnight for date-only imports). */
     expiresAt: number | null;
+    /** `YYYY-MM-DD` (UTC) companion to `expiresAt`; render verbatim. */
+    expiresOn: string | null;
   }>;
   campaign: {
     id: string;
     granted: boolean | null;
+    /** Major currency units (dollars), or null. */
     amount: number | null;
+    /** unix ms epoch (UTC-midnight for date-only imports). */
     expiresAt: number | null;
+    /** `YYYY-MM-DD` (UTC) companion to `expiresAt`; render verbatim. */
+    expiresOn: string | null;
   } | null;
   purchases: {
+    /** Major currency units (dollars), or null. */
     purchasedThisMonthAmount: number | null;
+    /** Major currency units (dollars), or null. */
     monthlyCapAmount: number | null;
     resetsAt: number | null;
     maxDiscountPercent: number | null;

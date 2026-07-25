@@ -69,3 +69,23 @@ export function requireEnabledProvider(
   if (!enabledProviders.includes(value)) throw new Error(`provider "${value}" is disabled by QUOTA_PROVIDERS`);
   return value;
 }
+
+/** History retention window in days. Snapshots/reset-credit rows older than
+ * this are pruned on the poll cycle (the latest row per provider is always
+ * kept regardless of age — see `pruneHistory`). The default is intentionally
+ * generous: the AIUO consumer's "window reached 100%" history and banked-reset
+ * consumption inference read retained rows, so lowering this shortens the
+ * consumer's visible history. */
+export const DEFAULT_RETENTION_DAYS = 90;
+
+export function parseRetentionDays(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_RETENTION_DAYS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Invalid QUOTA_RETENTION_DAYS: expected a positive number of days, got "${raw}"`);
+  }
+  return parsed;
+}
+
+export const RETENTION_DAYS = parseRetentionDays(process.env.QUOTA_RETENTION_DAYS);
+export const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000;

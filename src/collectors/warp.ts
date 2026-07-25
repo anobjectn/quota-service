@@ -1,4 +1,5 @@
 import { domainPlistMtimeMs, readDefaultsKeyAsJson } from "../lib/plist";
+import { parseInstant } from "../lib/time";
 import type { CollectorResult, PoolSnapshot } from "../types";
 
 const WARP_DOMAIN = "dev.warp.Warp-Stable";
@@ -31,7 +32,7 @@ function toPoolSnapshot(info: WarpLimitInfo): PoolSnapshot {
       used,
       limit,
       usedPercent,
-      refreshesAt: info.next_refresh_time ? Date.parse(info.next_refresh_time) : null,
+      refreshesAt: parseInstant(info.next_refresh_time),
       cadence: info.request_limit_refresh_duration,
     },
     extra: {

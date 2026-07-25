@@ -1,4 +1,5 @@
 import { readGenericPassword } from "../lib/keychain";
+import { finiteNumber, parseInstant } from "../lib/time";
 import type { CollectorResult, UsageCredits, WindowQuota, WindowSnapshot } from "../types";
 
 const KEYCHAIN_SERVICE = "Claude Code-credentials";
@@ -124,9 +125,11 @@ function buildModelWindows(limits: OauthLimit[] | null | undefined): Record<stri
     const model = limit.scope?.model;
     const name = model?.display_name ?? model?.id;
     if (!name) continue; // not a per-model bucket (e.g. the aggregate "weekly_all" entry)
+    const usedPercent = finiteNumber(limit.percent);
+    if (usedPercent === null) continue; // a bucket with a non-finite percent is meaningless; omit it
     out[name] = {
-      usedPercent: limit.percent,
-      resetsAt: limit.resets_at ? Date.parse(limit.resets_at) : null,
+      usedPercent,
+      resetsAt: parseInstant(limit.resets_at),
     };
   }
   return out;
@@ -141,38 +144,48 @@ function minorToMajor(amountMinor: number, exponent: number): number {
 function buildUsageCredits(body: OauthUsageResponse): UsageCredits | null {
   const spend = body.spend;
   if (spend && (spend.used || spend.limit)) {
-    const exponent = spend.used?.exponent ?? spend.limit?.exponent ?? 2;
+    const exponent = finiteNumber(spend.used?.exponent) ?? finiteNumber(spend.limit?.exponent) ?? 2;
+    const usedMinor = finiteNumber(spend.used?.amount_minor);
+    const limitMinor = finiteNumber(spend.limit?.amount_minor);
     return {
       enabled: !!spend.enabled,
-      spentAmount: spend.used ? minorToMajor(spend.used.amount_minor, exponent) : 0,
-      limitAmount: spend.limit ? minorToMajor(spend.limit.amount_minor, exponent) : null,
+      spentAmount: usedMinor !== null ? minorToMajor(usedMinor, exponent) : 0,
+      limitAmount: limitMinor !== null ? minorToMajor(limitMinor, exponent) : null,
       currency: spend.used?.currency ?? spend.limit?.currency ?? "USD",
-      resetsAt: spend.resets_at ? Date.parse(spend.resets_at) : null,
+      resetsAt: parseInstant(spend.resets_at),
     };
   }
   const extra = body.extra_usage;
   if (extra) {
-    const decimals = extra.decimal_places ?? 2;
+    const decimals = finiteNumber(extra.decimal_places) ?? 2;
+    const usedCredits = finiteNumber(extra.used_credits);
+    const monthlyLimit = finiteNumber(extra.monthly_limit);
     return {
       enabled: !!extra.is_enabled,
-      spentAmount: extra.used_credits != null ? extra.used_credits / 10 ** decimals : 0,
-      limitAmount: extra.monthly_limit != null ? extra.monthly_limit / 10 ** decimals : null,
+      spentAmount: usedCredits !== null ? usedCredits / 10 ** decimals : 0,
+      limitAmount: monthlyLimit !== null ? monthlyLimit / 10 ** decimals : null,
       currency: extra.currency ?? "USD",
-      resetsAt: extra.resets_at ? Date.parse(extra.resets_at) : null,
+      resetsAt: parseInstant(extra.resets_at),
     };
   }
   return null;
 }
 
+/** A rolling-window field -> WindowQuota, guarding both the percent and the
+ * reset instant. A non-finite `utilization` yields `null` (window omitted)
+ * rather than a `NaN` dial silently serialized as `null`. */
+function toWindowQuota(field: WindowField | null | undefined): WindowQuota | null {
+  if (!field) return null;
+  const usedPercent = finiteNumber(field.utilization);
+  if (usedPercent === null) return null;
+  return { usedPercent, resetsAt: parseInstant(field.resets_at) };
+}
+
 function toWindowSnapshot(body: OauthUsageResponse): WindowSnapshot {
   return {
     kind: "window",
-    fiveHour: body.five_hour
-      ? { usedPercent: body.five_hour.utilization, resetsAt: Date.parse(body.five_hour.resets_at) }
-      : null,
-    weekly: body.seven_day
-      ? { usedPercent: body.seven_day.utilization, resetsAt: Date.parse(body.seven_day.resets_at) }
-      : null,
+    fiveHour: toWindowQuota(body.five_hour),
+    weekly: toWindowQuota(body.seven_day),
     modelWindows: buildModelWindows(body.limits),
     usageCredits: buildUsageCredits(body),
     extra: {

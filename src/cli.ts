@@ -93,7 +93,7 @@ function renderProviderLine(p: ProviderReport): string[] {
         const balance = web.currentBalance == null ? "?" : web.currentBalance.toFixed(2);
         lines.push(`  Claude Web credits: $${balance} ${web.currency} — imported ${formatAge(Date.now() - web.capturedAt)}`);
         for (const tranche of web.promotionalTranches) {
-          const expiry = tranche.expiresAt == null ? "unknown" : new Date(tranche.expiresAt).toISOString().slice(0, 10);
+          const expiry = tranche.expiresOn ?? "unknown";
           lines.push(`    promotional: $${tranche.remainingAmount.toFixed(2)} remaining, expires ${expiry}`);
         }
         continue;

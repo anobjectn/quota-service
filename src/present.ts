@@ -6,6 +6,7 @@ import type { Database } from "bun:sqlite";
 import { ENABLED_PROVIDERS } from "./config";
 import { getLatestResetCredits, getLatestSnapshot, getManualEntries } from "./db";
 import { POLL_FLOORS_MS } from "./collect";
+import { finiteNumber, parseInstant, toUtcDateString } from "./lib/time";
 import type {
   AnthropicWebCredits,
   CollectorResult,
@@ -93,17 +94,6 @@ function buildProviderReport(db: Database, provider: Provider, now: number): Pro
   };
 }
 
-function finiteNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function timestamp(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value !== "string") return null;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 function parseAnthropicWebCredits(entry: ManualEntry | undefined): AnthropicWebCredits | null {
   if (!entry) return null;
   try {
@@ -114,10 +104,12 @@ function parseAnthropicWebCredits(entry: ManualEntry | undefined): AnthropicWebC
           const tranche = value as Record<string, unknown>;
           const remainingAmount = finiteNumber(tranche.remainingAmount);
           if (remainingAmount === null) return [];
+          const expiresAt = parseInstant(tranche.expiresAt);
           return [{
             remainingAmount,
             grantedAmount: finiteNumber(tranche.grantedAmount),
-            expiresAt: timestamp(tranche.expiresAt),
+            expiresAt,
+            expiresOn: toUtcDateString(expiresAt),
           }];
         })
       : [];
@@ -127,29 +119,33 @@ function parseAnthropicWebCredits(entry: ManualEntry | undefined): AnthropicWebC
     const rawPurchases = raw.purchases && typeof raw.purchases === "object"
       ? raw.purchases as Record<string, unknown>
       : null;
+    const nextExpiresAt = parseInstant(raw.nextExpiresAt);
+    const campaignExpiresAt = rawCampaign ? parseInstant(rawCampaign.expiresAt) : null;
     return {
       source: "claude_web_manual",
-      capturedAt: timestamp(raw.capturedAt) ?? entry.updatedAt,
+      capturedAt: parseInstant(raw.capturedAt) ?? entry.updatedAt,
       updatedAt: entry.updatedAt,
       currentBalance: finiteNumber(raw.currentBalance),
       balanceCredits: finiteNumber(raw.balanceCredits),
       currency: typeof raw.currency === "string" ? raw.currency : "USD",
       autoReloadEnabled: typeof raw.autoReloadEnabled === "boolean" ? raw.autoReloadEnabled : null,
-      nextExpiresAt: timestamp(raw.nextExpiresAt),
+      nextExpiresAt,
+      nextExpiresOn: toUtcDateString(nextExpiresAt),
       promotionalTranches,
       campaign: rawCampaign && typeof rawCampaign.id === "string"
         ? {
             id: rawCampaign.id,
             granted: typeof rawCampaign.granted === "boolean" ? rawCampaign.granted : null,
             amount: finiteNumber(rawCampaign.amount),
-            expiresAt: timestamp(rawCampaign.expiresAt),
+            expiresAt: campaignExpiresAt,
+            expiresOn: toUtcDateString(campaignExpiresAt),
           }
         : null,
       purchases: rawPurchases
         ? {
             purchasedThisMonthAmount: finiteNumber(rawPurchases.purchasedThisMonthAmount),
             monthlyCapAmount: finiteNumber(rawPurchases.monthlyCapAmount),
-            resetsAt: timestamp(rawPurchases.resetsAt),
+            resetsAt: parseInstant(rawPurchases.resetsAt),
             maxDiscountPercent: finiteNumber(rawPurchases.maxDiscountPercent),
           }
         : null,

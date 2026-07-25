@@ -38,6 +38,11 @@ The default providers are `codex,anthropic`. To include Warp, edit `.env`:
 ```dotenv
 QUOTA_PROVIDERS=codex,anthropic,warp
 QUOTA_PORT=8787
+# History retention in days (default 90). Snapshot/reset-credit rows older than
+# this are pruned on the poll cycle; the latest row per provider is always kept.
+# Lowering this shortens the history any consumer (e.g. ai-usage-observatory)
+# can see.
+QUOTA_RETENTION_DAYS=90
 ```
 
 ## CLI
