@@ -21,7 +21,7 @@ const db = openDb();
 
 const server = new McpServer({
   name: "quota-service",
-  version: "1.0.0",
+  version: "1.1.0",
 });
 
 server.registerTool(
