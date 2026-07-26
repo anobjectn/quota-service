@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release quota-service"
+  short_description: "Plan, review, and publish project releases"
+  default_prompt: "Use $release-quota-service to make a new release."
