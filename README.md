@@ -1,5 +1,10 @@
 # quota-service
 
+![Version 1.1.0](https://img.shields.io/badge/version-1.1.0-5c7cfa)
+![Runtime Bun](https://img.shields.io/badge/runtime-Bun-f9f1e1)
+![Local-first](https://img.shields.io/badge/architecture-local--first-2d9d78)
+![Read-only provider collection](https://img.shields.io/badge/provider%20collection-read--only-3b82f6)
+
 A local-first, read-only usage and quota tracker for Codex, Claude Code, and optional Warp usage. Use it from the command line for a current quota report, or connect its MCP server to an agent that needs live quota context. The browser dashboard is an optional, bare-bones interface.
 
 ## What it provides
