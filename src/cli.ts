@@ -75,6 +75,11 @@ function renderProviderLine(p: ProviderReport): string[] {
       const resetStr = credits.resetsAt != null ? `  resets ${formatCountdown(credits.resetsAt)}` : "";
       lines.push(`  usage credits: [${badge}] $${credits.spentAmount.toFixed(2)} / $${limitStr} ${credits.currency}${resetStr}`);
     }
+    const codexCredits = p.snapshot.codexCredits;
+    if (codexCredits) {
+      const balance = codexCredits.balance == null ? "?" : codexCredits.balance.toLocaleString();
+      lines.push(`  Codex credits: ${codexCredits.unlimited ? "unlimited" : balance} [${codexCredits.hasCredits ? "available" : "not available"}]`);
+    }
     const extra = p.snapshot.extra as Record<string, unknown> | undefined;
     if (extra?.planType) lines.push(`  plan: ${extra.planType}`);
     if (extra?.bankedResetCreditsAvailable != null) {

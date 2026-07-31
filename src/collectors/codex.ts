@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readdir, stat } from "node:fs/promises";
-import type { CollectorResult, ResetCreditsResult, WindowSnapshot } from "../types";
+import type { CodexCredits, CollectorResult, ResetCreditsResult, WindowSnapshot } from "../types";
 
 const CODEX_HOME = process.env.CODEX_HOME ?? join(homedir(), ".codex");
 const SESSIONS_DIRS = [
@@ -13,9 +13,25 @@ export interface RateLimitsPayload {
   limit_id?: string;
   primary?: { used_percent: number; window_minutes: number; resets_at: number } | null;
   secondary?: { used_percent: number; window_minutes: number; resets_at: number } | null;
-  credits?: unknown;
+  credits?: CodexCreditsPayload | null;
   plan_type?: string | null;
   rate_limit_reached_type?: string | null;
+}
+
+interface CodexCreditsPayload {
+  has_credits?: boolean;
+  unlimited?: boolean;
+  balance?: number | string | null;
+}
+
+function normalizeCodexCredits(value: CodexCreditsPayload | null | undefined): CodexCredits | null {
+  if (!value) return null;
+  const balance = value.balance == null ? null : Number(value.balance);
+  return {
+    hasCredits: value.has_credits === true,
+    unlimited: value.unlimited === true,
+    balance: Number.isFinite(balance) ? balance : null,
+  };
 }
 
 /** Recursively find *.jsonl files under a dir, newest mtime first, capped for cost. */
@@ -130,6 +146,7 @@ export function toWindowSnapshotFromFile(rl: RateLimitsPayload): WindowSnapshot 
     weekly: weekly
       ? { usedPercent: weekly.used_percent, resetsAt: weekly.resets_at * 1000 }
       : null,
+    codexCredits: normalizeCodexCredits(rl.credits),
     extra: {
       planType: rl.plan_type ?? null,
       credits: rl.credits ?? null,
@@ -217,7 +234,7 @@ export interface WhamUsageResponse {
     primary_window: WhamWindow | null;
     secondary_window: WhamWindow | null;
   } | null;
-  credits?: unknown;
+  credits?: CodexCreditsPayload | null;
   rate_limit_reset_credits?: { available_count: number };
   rate_limit_reached_type?: string | null;
 }
@@ -251,6 +268,7 @@ export function toWindowSnapshotFromWham(body: WhamUsageResponse): WindowSnapsho
     weekly: weekly
       ? { usedPercent: weekly.used_percent, resetsAt: weekly.reset_at * 1000 }
       : null,
+    codexCredits: normalizeCodexCredits(body.credits),
     extra: {
       planType: body.plan_type ?? null,
       credits: body.credits ?? null,

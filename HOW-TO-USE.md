@@ -188,6 +188,13 @@ the legacy `extra_usage` block if `spend` is absent. `recommend_model`
 surfaces it as a flagged note (`usageCreditsNote`) when enabled with a
 remaining balance, but never factors it into automated ranking or spending.
 
+OpenAI/Codex account credits are exposed separately as
+`snapshot.codexCredits`: `{ hasCredits, unlimited, balance }`. `balance` is a
+provider-defined credit count, not a dollar amount. This field is optional for
+backward compatibility and is intended for machine consumers such as AI Usage
+Observatory; the raw provider response remains available under
+`snapshot.extra.credits`.
+
 Claude Web's **prepaid balance and promotional tranches are separate** from
 that monthly spend response. They come from authenticated web-session
 endpoints such as `…/prepaid/credits` and

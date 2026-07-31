@@ -40,6 +40,13 @@ export interface UsageCredits {
   resetsAt: number | null;
 }
 
+/** OpenAI/Codex account credits reported alongside rate-limit windows. */
+export interface CodexCredits {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance: number | null;
+}
+
 /** Claude Web-only prepaid-credit details. Claude Code's OAuth token cannot
  * read these endpoints, so this is an explicitly user-imported snapshot with
  * its own timestamp and provenance rather than being presented as live API
@@ -113,6 +120,8 @@ export interface WindowSnapshot {
   modelWindows?: Record<string, WindowQuota>;
   /** Usage-credits / spend-based fallback balance, when the provider reports one. */
   usageCredits?: UsageCredits | null;
+  /** Codex credits, measured in provider-defined credits rather than money. */
+  codexCredits?: CodexCredits | null;
   /** provider-specific extras (plan type, raw per-model debug fields, etc.) */
   extra?: Record<string, unknown>;
 }

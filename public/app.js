@@ -175,8 +175,9 @@ function statusPill(status) {
 
 function renderCreditLedger(p) {
   const credits = p.snapshot?.usageCredits;
-  const web = p.anthropicWebCredits;
-  if (!credits && !web) return "";
+  const codexCredits = p.snapshot?.codexCredits;
+  const web = p.provider === "anthropic" ? p.anthropicWebCredits : null;
+  if (!credits && !codexCredits && !web) return "";
 
   const monthlyPercent = credits?.limitAmount
     ? Math.min(100, credits.spentAmount / credits.limitAmount * 100)
@@ -187,10 +188,11 @@ function renderCreditLedger(p) {
     : web?.campaign?.id?.replaceAll("_", " ");
   const importedAge = web ? fmtAge(Date.now() - web.capturedAt) : null;
 
-  return `<section class="credit-ledger" aria-label="Anthropic usage credits">
+  const isCodex = p.provider === "codex";
+  return `<section class="credit-ledger" aria-label="${isCodex ? "Codex credits" : "Anthropic usage credits"}">
     <div class="credit-ledger-head">
       <div>
-        <span class="eyebrow">usage credits</span>
+        <span class="eyebrow">${isCodex ? "account credits" : "usage credits"}</span>
         <strong>Spend &amp; balance</strong>
       </div>
       ${credits
@@ -203,11 +205,16 @@ function renderCreditLedger(p) {
         <strong>${fmtMoney(credits.spentAmount, credits.currency)}</strong>
         <small>of ${fmtMoney(credits.limitAmount, credits.currency)} cap${monthlyPercent == null ? "" : ` · ${monthlyPercent.toFixed(0)}%`}</small>
       </div>` : ""}
-      <div class="credit-metric ${web ? "" : "is-missing"}">
+      ${codexCredits ? `<div class="credit-metric">
+        <span>balance</span>
+        <strong>${codexCredits.unlimited ? "unlimited" : codexCredits.balance == null ? "—" : codexCredits.balance.toLocaleString()}</strong>
+        <small>OpenAI account credits · ${codexCredits.hasCredits ? "available" : "not available"}</small>
+      </div>` : ""}
+      ${p.provider === "anthropic" ? `<div class="credit-metric ${web ? "" : "is-missing"}">
         <span>prepaid balance</span>
         <strong>${web ? fmtMoney(web.currentBalance, web.currency) : "not imported"}</strong>
         <small>${web ? `Claude Web · ${importedAge}` : "Web-session data; add it below"}</small>
-      </div>
+      </div>` : ""}
       ${promo ? `<div class="credit-metric credit-metric-promo">
         <span>promotional credit</span>
         <strong>${fmtMoney(promo.remainingAmount, web.currency)}</strong>
@@ -576,6 +583,80 @@ document.getElementById("profile-row").addEventListener("click", (e) => {
   if (btn) selectProfile(btn.dataset.profile);
 });
 
+// ---------- quick data reference ----------
+
+function initializeCommandReference() {
+  const origin = window.location.origin;
+  document.querySelectorAll("[data-command-template]").forEach((el) => {
+    const command = el.dataset.commandTemplate.replaceAll("{origin}", origin);
+    el.dataset.command = command;
+    el.textContent = command;
+  });
+}
+
+function initializeOverallPopover() {
+  const badge = document.getElementById("overall-badge");
+  const tooltip = document.getElementById("overall-badge-tooltip");
+  if (!badge || !tooltip) return;
+
+  if (typeof tooltip.showPopover === "function") {
+    tooltip.hidden = false;
+    tooltip.addEventListener("toggle", (event) => {
+      badge.setAttribute("aria-expanded", event.newState === "open" ? "true" : "false");
+    });
+    return;
+  }
+
+  // Older engines still get a usable fallback if they do not implement Popover.
+  tooltip.hidden = true;
+  const showFallback = () => {
+    tooltip.hidden = false;
+    badge.setAttribute("data-tooltip-visible", "true");
+  };
+  const hideFallback = () => {
+    tooltip.hidden = true;
+    badge.removeAttribute("data-tooltip-visible");
+  };
+  badge.addEventListener("mouseenter", showFallback);
+  badge.addEventListener("mouseleave", hideFallback);
+  badge.addEventListener("focus", showFallback);
+  badge.addEventListener("blur", hideFallback);
+}
+
+async function copyCommand(button) {
+  const code = button.parentElement.querySelector("[data-command]");
+  const command = code?.dataset.command;
+  if (!command) return;
+
+  try {
+    await navigator.clipboard.writeText(command);
+    button.textContent = "Copied";
+    button.dataset.copied = "true";
+  } catch {
+    const range = document.createRange();
+    range.selectNodeContents(code);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const copied = document.execCommand("copy");
+    button.textContent = copied ? "Copied" : "Selected";
+    if (copied) {
+      button.dataset.copied = "true";
+      selection.removeAllRanges();
+    }
+  }
+
+  window.setTimeout(() => {
+    button.textContent = "Copy";
+    button.removeAttribute("data-copied");
+  }, 1600);
+}
+
+document.getElementById("command-list").addEventListener("click", (e) => {
+  const button = e.target.closest(".copy-command");
+  if (button) copyCommand(button);
+});
+
 // ---------- user-maintained provider data ----------
 
 function optionalFormNumber(form, name) {
@@ -651,5 +732,7 @@ document.getElementById("cards").addEventListener("submit", async (e) => {
 
 tickClock();
 setInterval(tickClock, 1000);
+initializeCommandReference();
+initializeOverallPopover();
 loadUsage();
 setInterval(loadUsage, 30_000);

@@ -75,6 +75,24 @@ test("file and API tactics normalize equivalent windows consistently", () => {
   });
 });
 
+test("normalizes OpenAI account credits without treating them as currency", () => {
+  const snapshot = toWindowSnapshotFromWham({
+    ...apiFixture,
+    credits: { has_credits: true, unlimited: false, balance: "1250" },
+  });
+
+  expect(snapshot.codexCredits).toEqual({
+    hasCredits: true,
+    unlimited: false,
+    balance: 1250,
+  });
+  expect(snapshot.extra?.credits).toEqual({
+    has_credits: true,
+    unlimited: false,
+    balance: "1250",
+  });
+});
+
 test("degraded file result preserves warning and weekly semantics through reports", () => {
   const capturedAt = Date.now();
   const fileResult: CollectorResult = {

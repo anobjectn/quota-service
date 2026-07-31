@@ -20,11 +20,11 @@
       </div>
     </div>
     <div class="topbar-right">
-      <div id="overall-badge" class="overall-badge" data-state="ok" tabindex="0" aria-describedby="overall-badge-tooltip">
+      <button id="overall-badge" class="overall-badge" data-state="ok" type="button" popovertarget="overall-badge-tooltip" aria-expanded="false" aria-describedby="overall-badge-tooltip">
         <span class="dot"></span>
         <span class="overall-text">All systems nominal</span>
-        <span id="overall-badge-tooltip" class="overall-badge-tooltip" role="tooltip">A conservative summary across every provider. “Needs attention” means at least one provider is unavailable or unknown; “Headroom tightening” means data is stale or a quota window is 60%+ used; otherwise no reported window is 60%+ used. It reflects the single worst signal, not a combined quota.</span>
-      </div>
+      </button>
+      <div id="overall-badge-tooltip" class="overall-badge-tooltip" popover="auto" role="tooltip">A conservative summary across every provider. “Needs attention” means at least one provider is unavailable or unknown; “Headroom tightening” means data is stale or a quota window is 60%+ used; otherwise no reported window is 60%+ used. It reflects the single worst signal, not a combined quota.</div>
       <div class="clock" id="clock">--:--:--</div>
     </div>
   </header>
@@ -47,6 +47,104 @@
       </div>
       <div id="recommend-result" class="recommend-result">
         <p class="muted">Pick a task profile above to see a live recommendation.</p>
+      </div>
+    </section>
+
+    <section class="panel reference-panel" aria-labelledby="reference-title">
+      <div class="reference-intro">
+        <span class="reference-kicker">return paths</span>
+        <h2 class="panel-title" id="reference-title">Quick data reference</h2>
+        <p class="panel-hint">Copy a ready-to-run command for human-readable or structured quota data. HTTP commands use this dashboard’s current origin.</p>
+        <div class="reference-key" aria-label="command type legend">
+          <span><i class="reference-key-dot is-cli"></i>CLI</span>
+          <span><i class="reference-key-dot is-http"></i>HTTP</span>
+        </div>
+      </div>
+
+      <div class="command-list" id="command-list">
+        <article class="command-row">
+          <div class="command-meta">
+            <span class="command-index">01</span>
+            <div><strong>Full usage report</strong><span>Human-readable provider windows, pools, credits, and freshness</span></div>
+          </div>
+          <div class="command-shell">
+            <span class="command-type is-cli">CLI</span>
+            <code data-command="bun run quota">bun run quota</code>
+            <button class="copy-command" type="button" aria-label="Copy full usage report command">Copy</button>
+          </div>
+        </article>
+
+        <article class="command-row">
+          <div class="command-meta">
+            <span class="command-index">02</span>
+            <div><strong>Full usage JSON</strong><span>Machine-readable version of the full usage report</span></div>
+          </div>
+          <div class="command-shell">
+            <span class="command-type is-cli">CLI</span>
+            <code data-command="bun run quota json">bun run quota json</code>
+            <button class="copy-command" type="button" aria-label="Copy full usage JSON command">Copy</button>
+          </div>
+        </article>
+
+        <article class="command-row">
+          <div class="command-meta">
+            <span class="command-index">03</span>
+            <div><strong>Reset schedule</strong><span>Human-readable windows, pools, and banked reset credits</span></div>
+          </div>
+          <div class="command-shell">
+            <span class="command-type is-cli">CLI</span>
+            <code data-command="bun run quota resets">bun run quota resets</code>
+            <button class="copy-command" type="button" aria-label="Copy reset schedule command">Copy</button>
+          </div>
+        </article>
+
+        <article class="command-row">
+          <div class="command-meta">
+            <span class="command-index">04</span>
+            <div><strong>Reset schedule JSON</strong><span>Machine-readable reset windows and credits</span></div>
+          </div>
+          <div class="command-shell">
+            <span class="command-type is-cli">CLI</span>
+            <code data-command="bun run quota resets json">bun run quota resets json</code>
+            <button class="copy-command" type="button" aria-label="Copy reset schedule JSON command">Copy</button>
+          </div>
+        </article>
+
+        <article class="command-row">
+          <div class="command-meta">
+            <span class="command-index">05</span>
+            <div><strong>Service health</strong><span>Poll state, process health, and enabled providers</span></div>
+          </div>
+          <div class="command-shell">
+            <span class="command-type is-http">HTTP</span>
+            <code data-command-template="curl -sS {origin}/status | jq"></code>
+            <button class="copy-command" type="button" aria-label="Copy service health command">Copy</button>
+          </div>
+        </article>
+
+        <article class="command-row">
+          <div class="command-meta">
+            <span class="command-index">06</span>
+            <div><strong>Restart local service</strong><span>Find this installation's launchd job and reload it</span></div>
+          </div>
+          <div class="command-shell">
+            <span class="command-type is-cli">CLI</span>
+            <code data-command="job=&quot;$(launchctl list | awk '$3 ~ /quota-service$/ {print $3; exit}')&quot;; test -n &quot;$job&quot; &amp;&amp; launchctl kickstart -k &quot;gui/$(id -u)/$job&quot;">job=&quot;$(launchctl list | awk '$3 ~ /quota-service$/ {print $3; exit}')&quot;; test -n &quot;$job&quot; &amp;&amp; launchctl kickstart -k &quot;gui/$(id -u)/$job&quot;</code>
+            <button class="copy-command" type="button" aria-label="Copy local service restart command">Copy</button>
+          </div>
+        </article>
+
+        <article class="command-row">
+          <div class="command-meta">
+            <span class="command-index">07</span>
+            <div><strong>Live recommendation</strong><span>Ranked provider and model for a feature-sized task</span></div>
+          </div>
+          <div class="command-shell">
+            <span class="command-type is-http">HTTP</span>
+            <code data-command-template="curl -sS '{origin}/recommend?taskProfile=feature' | jq"></code>
+            <button class="copy-command" type="button" aria-label="Copy live recommendation command">Copy</button>
+          </div>
+        </article>
       </div>
     </section>
   </main>
