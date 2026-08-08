@@ -198,13 +198,15 @@ function pruneHistoryTable(db: Database, table: string, retentionMs: number, now
 }
 
 /** Prune both history tables (`snapshots`, `reset_credits`) to the retention
- * window. Best-effort at the call site (the poll loop guards it) — this only
- * runs SQL and returns per-table deletion counts. */
+ * window. A `null` window disables pruning. Best-effort at the call site (the
+ * poll loop guards it) — this only runs SQL and returns per-table deletion
+ * counts. */
 export function pruneHistory(
   db: Database,
-  retentionMs: number,
+  retentionMs: number | null,
   now: number = Date.now(),
 ): { snapshots: number; resetCredits: number } {
+  if (retentionMs === null) return { snapshots: 0, resetCredits: 0 };
   return {
     snapshots: pruneHistoryTable(db, "snapshots", retentionMs, now),
     resetCredits: pruneHistoryTable(db, "reset_credits", retentionMs, now),

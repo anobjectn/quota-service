@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { parseEnabledProviders, requireEnabledProvider } from "../src/config";
+import {
+  DEFAULT_RETENTION_DAYS,
+  parseEnabledProviders,
+  parseRetentionDays,
+  requireEnabledProvider,
+} from "../src/config";
 import { buildServiceStatus } from "../src/status";
 
 describe("provider configuration", () => {
@@ -33,6 +38,26 @@ describe("provider configuration", () => {
       pollMs: 300_000,
       enabledProviders: ["warp", "codex"],
     });
+  });
+});
+
+describe("retention configuration", () => {
+  test("preserves all history by default when unset or blank", () => {
+    expect(parseRetentionDays(undefined)).toBe(DEFAULT_RETENTION_DAYS);
+    expect(parseRetentionDays("  ")).toBe(DEFAULT_RETENTION_DAYS);
+    expect(DEFAULT_RETENTION_DAYS).toBeNull();
+  });
+
+  test("accepts a positive number of days to opt into periodic pruning", () => {
+    expect(parseRetentionDays("365")).toBe(365);
+  });
+
+  test('accepts "forever" to disable automatic pruning', () => {
+    expect(parseRetentionDays(" forever ")).toBeNull();
+  });
+
+  test.each(["0", "-1", "never", "NaN"])("rejects invalid value %p", (raw) => {
+    expect(() => parseRetentionDays(raw)).toThrow('positive number of days or "forever"');
   });
 });
 

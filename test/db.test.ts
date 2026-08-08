@@ -103,3 +103,16 @@ test("pruneHistory is a no-op when everything is within the window", () => {
   expect(snapshotCount(db)).toBe(2);
   db.close();
 });
+
+test("pruneHistory is a no-op when automatic retention is disabled", () => {
+  const db = testDb();
+  const now = Date.now();
+  saveSnapshot(db, snapshotAt("codex", now - 1_000 * DAY_MS));
+  saveSnapshot(db, snapshotAt("codex", now - 900 * DAY_MS));
+
+  const deleted = pruneHistory(db, null, now);
+
+  expect(deleted).toEqual({ snapshots: 0, resetCredits: 0 });
+  expect(snapshotCount(db)).toBe(2);
+  db.close();
+});

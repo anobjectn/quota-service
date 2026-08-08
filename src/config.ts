@@ -70,22 +70,24 @@ export function requireEnabledProvider(
   return value;
 }
 
-/** History retention window in days. Snapshots/reset-credit rows older than
- * this are pruned on the poll cycle (the latest row per provider is always
- * kept regardless of age — see `pruneHistory`). The default is intentionally
- * generous: the AIUO consumer's "window reached 100%" history and banked-reset
- * consumption inference read retained rows, so lowering this shortens the
- * consumer's visible history. */
-export const DEFAULT_RETENTION_DAYS = 90;
+/** History retention window in days, or `null` when automatic pruning is
+ * disabled. History is preserved by default; setting a positive number opts
+ * into pruning on the poll cycle (the latest row per provider is always kept
+ * regardless of age — see `pruneHistory`). */
+export const DEFAULT_RETENTION_DAYS = null;
 
-export function parseRetentionDays(raw: string | undefined): number {
+export function parseRetentionDays(raw: string | undefined): number | null {
   if (raw === undefined || raw.trim() === "") return DEFAULT_RETENTION_DAYS;
-  const parsed = Number(raw);
+  const value = raw.trim();
+  if (value === "forever") return null;
+  const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`Invalid QUOTA_RETENTION_DAYS: expected a positive number of days, got "${raw}"`);
+    throw new Error(
+      `Invalid QUOTA_RETENTION_DAYS: expected a positive number of days or "forever", got "${raw}"`,
+    );
   }
   return parsed;
 }
 
 export const RETENTION_DAYS = parseRetentionDays(process.env.QUOTA_RETENTION_DAYS);
-export const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000;
+export const RETENTION_MS = RETENTION_DAYS === null ? null : RETENTION_DAYS * 24 * 60 * 60 * 1000;

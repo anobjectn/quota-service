@@ -43,12 +43,15 @@ The default providers are `codex,anthropic`. To include Warp, edit `.env`:
 ```dotenv
 QUOTA_PROVIDERS=codex,anthropic,warp
 QUOTA_PORT=8787
-# History retention in days (default 90). Snapshot/reset-credit rows older than
-# this are pruned on the poll cycle; the latest row per provider is always kept.
-# Lowering this shortens the history any consumer (e.g. ai-usage-observatory)
-# can see.
-QUOTA_RETENTION_DAYS=90
+# All history is retained by default. To opt into periodic pruning, set a
+# positive retention window; the latest row per provider is always kept.
+# This shortens the history any consumer (e.g. ai-usage-observatory) can see.
+# QUOTA_RETENTION_DAYS=90
 ```
+
+`QUOTA_RETENTION_DAYS=forever` is also accepted when you want to make the
+default preservation policy explicit. Automatic pruning only runs when this
+setting is a positive number.
 
 ## CLI
 
@@ -167,6 +170,8 @@ bun run serve
 ## Local data and credentials
 
 The repository ignores `.env`, `data/`, and SQLite database files. Collected snapshots are stored locally in `~/.quota-service/quota.db` by default. Provider credentials are read from existing local Codex and macOS Keychain sources and are not persisted by this service.
+
+Each provider assumes a single signed-in account: Codex credentials come from `~/.codex/auth.json`, and Anthropic credentials come from the macOS Keychain item Claude Code writes. If you use more than one account on the same provider, quota-service reports whichever one is currently signed in on this machine — it does not track multiple accounts per provider separately.
 
 ## Pair with AI Usage Observatory
 
