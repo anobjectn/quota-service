@@ -2,23 +2,32 @@
 
 This project uses Semantic Versioning, annotated Git tags, and GitHub Releases.
 There is no `CHANGELOG.md`; the GitHub Release notes are the canonical changelog
-and are written from the commit range. The version string is duplicated in a few
-source locations and every copy must match the release tag. There is no
-package-registry publication step and no automated release workflow.
+and are written from the commit range. The version string is duplicated across
+the project and every copy must match the release tag. There is no package
+registry publication step and no automated release workflow.
 
-## Version locations
+## Version locations and README badges
 
-A release bumps the version in **four** places, all of which must agree:
+A release updates every version surface, all of which must agree:
 
 - `package.json` — `"version"`.
 - `src/mcp.ts` — the `McpServer` `version` field.
 - `src/collectors/codex.ts` — both `User-Agent: "quota-service/<version> (+codex-cli-compatible)"` strings.
+- `README.md` — both the version badge alt text and its Shields.io URL.
 
 Before editing, confirm the current set:
 
 ```bash
-grep -rn '"version"\|version:\|quota-service/' package.json src/mcp.ts src/collectors/codex.ts
+grep -n '"version"\|version:\|quota-service/\|img.shields.io/badge/version-' \
+  package.json src/mcp.ts src/collectors/codex.ts README.md
 ```
+
+Every release must also inspect the complete badge group near the top of
+`README.md`, not just the version badge. Keep at most four compact badges and
+verify each claim against authoritative local sources such as the manifest,
+runtime scripts, server defaults, storage implementation, and collector code.
+Update or remove any stale, ambiguous, or unsupported badge. Do not infer facts
+from prior badge wording.
 
 ## Invocation and approval model
 
@@ -46,7 +55,9 @@ The review bundle must contain:
 - the exact proposed GitHub Release notes;
 - breaking changes, migrations, and upgrade notes, explicitly saying when there
   are none;
-- the verification commands and release mutations that execution will perform.
+- the verification commands and release mutations that execution will perform;
+- any required README badge changes, or an explicit statement that every badge
+  was checked and remains correct.
 
 Execution begins only after the user explicitly approves this complete bundle
 and its exact version. If any detail changes, the agent must present the revised
@@ -105,7 +116,8 @@ git rev-list --left-right --count main...origin/main
 Confirm all of the following before editing:
 
 - The user explicitly approved the exact target version and review bundle.
-- All four version locations match the latest `v<version>` tag.
+- All version surfaces match the latest `v<version>` tag.
+- The README badge group has been checked against authoritative local sources.
 - `main` has not diverged from `origin/main` (right-side count is `0`).
 - The working tree has no unrelated changes.
 - Neither `git tag --list 'v<target>'` nor
@@ -139,14 +151,22 @@ pushing, or publishing.
 
 ## 3. Prepare and verify
 
-Set the approved version in all four locations (see "Version locations"). Then
-run the complete verification suite:
+Set the approved version in every location (see "Version locations and README
+badges"), then validate the full badge group and run the complete verification
+suite:
 
 ```bash
+release_version=$(bun -e 'console.log((await Bun.file("package.json").json()).version)')
+readme_version_badge="![Version ${release_version}](https://img.shields.io/badge/version-${release_version}-"
+test "$(grep -Fc "$readme_version_badge" README.md)" -eq 1
+grep -n 'img.shields.io/badge' README.md
 bun run typecheck
 bun test
 git diff --check
 ```
+
+The first badge assertion must pass. Review every line printed by the second
+command against the authoritative sources described above.
 
 If any command fails, stop and report the failure. Do not tag or publish a
 partially verified release.
@@ -155,7 +175,7 @@ Review the final release diff and confirm it contains only the intended version
 changes:
 
 ```bash
-git diff -- package.json src/mcp.ts src/collectors/codex.ts
+git diff -- README.md package.json src/mcp.ts src/collectors/codex.ts
 git status --short
 ```
 
@@ -165,7 +185,7 @@ After applying `git-identity-routing`, stage the version changes and create the
 release commit using Conventional Commit format:
 
 ```bash
-git add package.json src/mcp.ts src/collectors/codex.ts
+git add README.md package.json src/mcp.ts src/collectors/codex.ts
 git commit -m "chore(release): v<target>"
 ```
 
