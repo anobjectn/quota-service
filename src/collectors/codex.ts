@@ -290,7 +290,7 @@ export async function collectCodexFromApi(): Promise<CollectorResult> {
   try {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${accessToken}`,
-      "User-Agent": "quota-service/1.1.0 (+codex-cli-compatible)",
+      "User-Agent": "quota-service/1.2.0 (+codex-cli-compatible)",
     };
     if (accountId) headers["ChatGPT-Account-Id"] = accountId;
     const res = await fetch(`${WHAM_BASE}/usage`, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
@@ -349,7 +349,7 @@ export async function collectCodexResetCredits(): Promise<ResetCreditsResult> {
   try {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${accessToken}`,
-      "User-Agent": "quota-service/1.1.0 (+codex-cli-compatible)",
+      "User-Agent": "quota-service/1.2.0 (+codex-cli-compatible)",
     };
     if (accountId) headers["ChatGPT-Account-Id"] = accountId;
     const res = await fetch(`${WHAM_BASE}/rate-limit-reset-credits`, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
