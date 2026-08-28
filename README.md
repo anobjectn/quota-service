@@ -9,7 +9,7 @@ A local-first, read-only usage and quota tracker for Codex, Claude Code, and opt
 
 ## What it provides
 
-- Live quota collection for Codex and Anthropic; optional manual Warp credit tracking.
+- Live quota collection for Codex and Anthropic; optional local Warp credit collection.
 - A CLI for usage, reset windows, cost estimates, and model recommendations.
 - An MCP server exposing the same live usage, reset, estimation, and recommendation context to agents.
 - A compact credit ledger and expandable Sources / Provenance view that keeps
@@ -43,15 +43,59 @@ The default providers are `codex,anthropic`. To include Warp, edit `.env`:
 ```dotenv
 QUOTA_PROVIDERS=codex,anthropic,warp
 QUOTA_PORT=8787
-# All history is retained by default. To opt into periodic pruning, set a
-# positive retention window; the latest row per provider is always kept.
-# This shortens the history any consumer (e.g. ai-usage-observatory) can see.
-# QUOTA_RETENTION_DAYS=90
+QUOTA_RETENTION_DAYS=forever
 ```
 
-`QUOTA_RETENTION_DAYS=forever` is also accepted when you want to make the
-default preservation policy explicit. Automatic pruning only runs when this
-setting is a positive number.
+`forever` is the documented policy for session quota context. An unset value
+still keeps all history. A positive number opts into destructive pruning on
+the next poll. The service always keeps each provider's newest row, but rows
+outside the configured window cannot be restored by changing the setting
+back to `forever`. Back up the SQLite database and its WAL before reducing
+retention. The service does not run `VACUUM` automatically.
+
+## Historical API
+
+`GET /history` returns normalized, chronological quota observations without
+calling a collector. One request covers at most 31 days and names one enabled
+provider:
+
+```text
+GET /history?provider=codex&from=1787875200000&to=1790553599999&limit=1000
+```
+
+Responses retain raw counts for Warp, fractional percentages, observed and
+collection timestamps, plan provenance, the earliest available observation,
+and the active retention policy. `historyVersion` is the provider's maximum
+snapshot row ID. Follow `nextCursor` until it is null. The cursor pins that
+version so new inserts do not reorder an in-progress read. `limit` may be at
+most 5,000.
+
+`POST /manual` accepts `field: "plan_tier"` for effective-dated Claude or
+Warp tier assignments. `effectiveFrom` is epoch milliseconds and defaults to
+the write time. Assignments are append-only and finite retention never prunes
+them. Older observations keep the tier that applied when the service observed
+them.
+
+## Optional Claude lifecycle markers
+
+The helper at `scripts/claude-quota-marker.ts` records only the Claude session
+ID, lifecycle event, and timestamp. It does not send prompts, responses,
+paths, or credentials. The helper times out after 750 ms, writes nothing to
+standard output, and exits successfully if quota-service is unavailable. A
+marker never triggers collection or bypasses Anthropic's three-minute poll
+floor.
+
+Add the helper command to the Claude `SessionStart`, `Stop`, and `SessionEnd`
+hooks you choose to enable. Point it at this checkout with an absolute path:
+
+```text
+bun run /absolute/path/to/quota-service/scripts/claude-quota-marker.ts
+```
+
+Remove those hook entries to uninstall the integration. quota-service never
+edits global Claude settings. `GET /markers?from=<ms>&to=<ms>` exposes the
+stored markers to local consumers. Markers follow `QUOTA_RETENTION_DAYS`;
+`forever` keeps them indefinitely.
 
 ## CLI
 

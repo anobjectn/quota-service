@@ -4,8 +4,15 @@
 // Runs foreground with a poll loop while alive (on-demand + foreground mode
 // per Plan B's current operational stance — no launchd load yet).
 
-import { requireEnabledProvider, RETENTION_MS } from "./config";
-import { openDb, pruneHistory, setManualEntry } from "./db";
+import { ENABLED_PROVIDERS, requireEnabledProvider, RETENTION_MS } from "./config";
+import {
+  getLifecycleMarkers,
+  openDb,
+  pruneHistory,
+  saveLifecycleMarker,
+  setManualEntry,
+  setPlanAssignment,
+} from "./db";
 import { collectAll } from "./collect";
 import { normalizeAnthropicWebImport } from "./anthropic-web-import";
 import { buildResetsReport, buildUsageReport } from "./present";
@@ -13,6 +20,8 @@ import { estimateCost, isValidTaskProfile, recommendModel } from "./estimation";
 import { join } from "node:path";
 import { collectRunHistory } from "./run-history";
 import { buildServiceStatus } from "./status";
+import { buildHistoryResponse, HistoryRequestError } from "./history";
+import type { QuotaLifecycleMarker } from "./types";
 
 function parseArgs(argv: string[]): { host: string; port: number; pollMs: number } {
   let host = "127.0.0.1";
@@ -114,7 +123,23 @@ const server = Bun.serve({
       return Response.json(await collectRunHistory(url.searchParams.get("refresh") === "1"));
     }
     if (url.pathname === "/status") {
-      return Response.json(buildServiceStatus(pollMs));
+      return Response.json(buildServiceStatus(pollMs, ENABLED_PROVIDERS, process.uptime() * 1000, db));
+    }
+    if (url.pathname === "/history") {
+      try {
+        return Response.json(buildHistoryResponse(db, url.searchParams, ENABLED_PROVIDERS));
+      } catch (err) {
+        const status = err instanceof HistoryRequestError ? err.status : 500;
+        return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status });
+      }
+    }
+    if (url.pathname === "/markers" && req.method === "GET") {
+      const from = Number(url.searchParams.get("from"));
+      const to = Number(url.searchParams.get("to"));
+      if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to < from) {
+        return Response.json({ ok: false, error: "from and to must be epoch-millisecond integers" }, { status: 400 });
+      }
+      return Response.json({ markers: getLifecycleMarkers(db, from, to) });
     }
     if (url.pathname === "/estimate") {
       const raw = taskProfileParam(url);
@@ -130,17 +155,61 @@ const server = Bun.serve({
     }
     if (url.pathname === "/manual" && req.method === "POST") {
       try {
-        const body = (await req.json()) as { provider?: string; field?: string; value?: string; note?: string | null };
+        const body = (await req.json()) as {
+          provider?: string;
+          field?: string;
+          value?: string;
+          note?: string | null;
+          effectiveFrom?: number;
+        };
         if (!body.provider || !body.field || body.value === undefined) {
           return Response.json({ ok: false, error: "provider, field, value are required" }, { status: 400 });
         }
         const provider = requireEnabledProvider(body.provider);
+        if (body.effectiveFrom !== undefined && body.field !== "plan_tier") {
+          return Response.json({ ok: false, error: "effectiveFrom is valid only for plan_tier" }, { status: 400 });
+        }
+        if (body.field === "plan_tier") {
+          if (provider === "codex") {
+            return Response.json({ ok: false, error: "Codex plan tier is provider-reported" }, { status: 400 });
+          }
+          const effectiveFrom = body.effectiveFrom ?? Date.now();
+          if (!Number.isSafeInteger(effectiveFrom) || effectiveFrom < 0) {
+            return Response.json({ ok: false, error: "effectiveFrom must be epoch milliseconds" }, { status: 400 });
+          }
+          setPlanAssignment(db, {
+            provider,
+            planId: String(body.value),
+            planLabel: body.note?.trim() || String(body.value),
+            effectiveFrom,
+          });
+          return Response.json({ ok: true, effectiveFrom });
+        }
         setManualEntry(db, {
           provider,
           field: body.field,
           value: String(body.value),
           note: body.note ?? null,
         });
+        return Response.json({ ok: true });
+      } catch (err) {
+        return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 400 });
+      }
+    }
+    if (url.pathname === "/markers" && req.method === "POST") {
+      try {
+        requireEnabledProvider("anthropic");
+        const body = (await req.json()) as Partial<QuotaLifecycleMarker>;
+        const events = new Set(["session_start", "session_resume", "turn_stop", "session_end"]);
+        if (
+          body.provider !== "anthropic" || body.source !== "claude_hook" ||
+          typeof body.sessionId !== "string" || !body.sessionId.trim() || body.sessionId.length > 200 ||
+          typeof body.event !== "string" || !events.has(body.event) ||
+          !Number.isSafeInteger(body.occurredAt) || body.occurredAt! < 0
+        ) {
+          return Response.json({ ok: false, error: "invalid lifecycle marker" }, { status: 400 });
+        }
+        saveLifecycleMarker(db, body as QuotaLifecycleMarker);
         return Response.json({ ok: true });
       } catch (err) {
         return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 400 });
@@ -171,7 +240,7 @@ const server = Bun.serve({
 
 console.log(`quota-service listening on http://${server.hostname}:${server.port}`);
 console.log(`  polling every ${Math.round(pollMs / 1000)}s (respects per-provider poll floors)`);
-console.log(`  routes: GET /usage  GET /runs  GET /resets  GET /status  GET /estimate  GET /recommend  POST /manual  POST /anthropic-web-import`);
+console.log(`  routes: GET /usage  GET /runs  GET /resets  GET /status  GET /history  GET/POST /markers  GET /estimate  GET /recommend  POST /manual  POST /anthropic-web-import`);
 console.log(`  dashboard: http://${server.hostname}:${server.port}/`);
 if (host === "127.0.0.1" || host === "localhost") {
   console.log(`  bound to localhost only; pass --host <tailnet-ip> to expose on the tailnet`);

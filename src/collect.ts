@@ -4,7 +4,7 @@
 
 import { ENABLED_PROVIDERS } from "./config";
 import type { Database } from "bun:sqlite";
-import { getLatestSnapshot, saveResetCredits, saveSnapshot } from "./db";
+import { getLatestSnapshot, recordProviderAttempt, saveResetCredits, saveSnapshot } from "./db";
 import { collectAnthropic, ANTHROPIC_POLL_FLOOR_MS } from "./collectors/anthropic";
 import { collectCodexFromApi, collectCodexResetCredits } from "./collectors/codex";
 import { collectWarp } from "./collectors/warp";
@@ -64,10 +64,12 @@ async function recollectOrServeStale(
   try {
     const result = await withTimeout(collect(), COLLECT_ATTEMPT_TIMEOUT_MS, `${provider} collect`);
     saveSnapshot(db, result);
+    recordProviderAttempt(db, provider, Date.now(), result, result.error ?? null);
     return result;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (cached) {
+      recordProviderAttempt(db, provider, Date.now(), null, message);
       return {
         ...cached,
         error: `re-collect failed (${message}); serving last-known data`,
@@ -83,6 +85,7 @@ async function recollectOrServeStale(
       error: message,
     };
     saveSnapshot(db, failResult);
+    recordProviderAttempt(db, provider, Date.now(), failResult, message);
     return failResult;
   }
 }

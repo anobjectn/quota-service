@@ -248,13 +248,20 @@ export async function collectAnthropic(): Promise<CollectorResult> {
       };
     }
     const body = (await res.json()) as OauthUsageResponse;
+    const snapshot = toWindowSnapshot(body);
     return {
       provider: "anthropic",
       status: "ok",
       source: "anthropic_api",
       dataAsOf: capturedAt, // server-authoritative live call
       capturedAt,
-      snapshot: toWindowSnapshot(body),
+      snapshot: {
+        ...snapshot,
+        extra: {
+          ...snapshot.extra,
+          subscriptionType: creds.oauth.subscriptionType ?? null,
+        },
+      },
     };
   } catch (err) {
     return {

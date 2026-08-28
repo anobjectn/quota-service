@@ -188,6 +188,62 @@ export interface ManualEntry {
   updatedAt: number;
 }
 
+export interface PlanAssignment {
+  provider: Provider;
+  planId: string;
+  planLabel: string;
+  effectiveFrom: number;
+  createdAt: number;
+}
+
+export type QuotaObservation = {
+  schemaVersion: 1;
+  provider: Provider;
+  capturedAt: number;
+  observedAt: number;
+  timeSource: "provider" | "source_mtime" | "collector";
+  status: "ok" | "stale";
+  source: string;
+  plan: {
+    id: string | null;
+    label: string | null;
+    source: "provider" | "configured" | "unknown";
+    effectiveFrom: number | null;
+  };
+  quota:
+    | {
+        kind: "windows";
+        windows: Array<{
+          id: "fiveHour" | "weekly" | string;
+          usedPercent: number;
+          resetsAt: number | null;
+          cycleId: string;
+        }>;
+      }
+    | {
+        kind: "pool";
+        pool: {
+          id: "monthly" | string;
+          usedUnits: number;
+          limitUnits: number;
+          unit: "warp_credit" | "unknown";
+          unitSource: "provider_docs_and_local_schema" | "local_schema" | "unknown";
+          usedPercent: number;
+          refreshesAt: number | null;
+          cadence: string | null;
+          cycleId: string;
+        };
+      };
+};
+
+export type QuotaLifecycleMarker = {
+  provider: "anthropic";
+  sessionId: string;
+  event: "session_start" | "session_resume" | "turn_stop" | "session_end";
+  occurredAt: number;
+  source: "claude_hook";
+};
+
 /** One contiguous burst of activity in a local Codex/Claude session log.
  * Bursts are split after 30 minutes idle so a thread resumed days later does
  * not masquerade as one enormous run. Dollar amounts are API-list-price

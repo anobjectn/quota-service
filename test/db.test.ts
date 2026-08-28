@@ -34,6 +34,15 @@ function testDb(): Database {
       credits_json TEXT,
       error TEXT
     );
+    CREATE TABLE lifecycle_markers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      event TEXT NOT NULL,
+      occurred_at INTEGER NOT NULL,
+      source TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
   `);
   return db;
 }
@@ -112,7 +121,7 @@ test("pruneHistory is a no-op when automatic retention is disabled", () => {
 
   const deleted = pruneHistory(db, null, now);
 
-  expect(deleted).toEqual({ snapshots: 0, resetCredits: 0 });
+  expect(deleted).toEqual({ snapshots: 0, resetCredits: 0, lifecycleMarkers: 0 });
   expect(snapshotCount(db)).toBe(2);
   db.close();
 });
