@@ -70,9 +70,31 @@ describe("normalized quota history", () => {
       plan: { id: "plus", source: "provider" },
       quota: {
         kind: "windows",
-        windows: [{ id: "fiveHour", usedPercent: 12.5, cycleId: "reset:1788999960000" }],
+        windows: [{ id: "fiveHour", usedPercent: 12.5, cycleId: "reset:1789000020000" }],
       },
     });
+    db.close();
+  });
+
+  test("keeps one cycle identity when a reset instant jitters across the minute boundary", () => {
+    const db = testDb();
+    // Anthropic repeats the same five-hour reset with millisecond jitter around a round
+    // minute; both readings must land in the cycle a consumer can difference.
+    const jittered = (observedAt: number, resetsAt: number): CollectorResult => ({
+      provider: "anthropic", status: "ok", source: "anthropic_api",
+      dataAsOf: observedAt, capturedAt: observedAt,
+      snapshot: {
+        kind: "window",
+        fiveHour: { usedPercent: observedAt / 100, resetsAt },
+        weekly: null,
+        extra: {},
+      },
+    });
+    saveSnapshot(db, jittered(1_000, 1_788_044_999_981));
+    saveSnapshot(db, jittered(2_000, 1_788_045_000_001));
+    const result = buildHistoryResponse(db, params({ provider: "anthropic", from: "0", to: "10000" }), ["anthropic"]);
+    const cycles = result.observations.map((row) => row.quota.kind === "windows" ? row.quota.windows[0]!.cycleId : null);
+    expect(cycles).toEqual(["reset:1788045000000", "reset:1788045000000"]);
     db.close();
   });
 

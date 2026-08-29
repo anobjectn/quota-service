@@ -68,9 +68,12 @@ function decodeCursor(raw: string): Cursor {
 }
 
 function cycleId(at: number | null, observedAt: number): string {
+  // Providers repeat one reset instant with sub-second jitter, and those instants sit on a
+  // round minute, so flooring splits a single cycle across two ids every time the jitter
+  // crosses the boundary. Rounding folds the jitter back onto the instant it belongs to.
   return at === null
     ? `observed:${observedAt}`
-    : `reset:${Math.floor(at / 60_000) * 60_000}`;
+    : `reset:${Math.round(at / 60_000) * 60_000}`;
 }
 
 function timeSource(source: string, dataAsOf: number | null): QuotaObservation["timeSource"] {

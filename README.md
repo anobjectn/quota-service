@@ -97,6 +97,13 @@ edits global Claude settings. `GET /markers?from=<ms>&to=<ms>` exposes the
 stored markers to local consumers. Markers follow `QUOTA_RETENTION_DAYS`;
 `forever` keeps them indefinitely.
 
+The helper posts to `QUOTA_SERVICE_URL` (a base URL, default
+`http://127.0.0.1:8787`) and resolves `/markers` against it. The `/markers`
+routes arrived in 1.3.0, so a service process started from an older revision
+answers 404 and every marker is dropped in silence — restart the service after
+upgrading. Set `QUOTA_MARKER_DEBUG=1` to have the helper report a failed post on
+standard error; it still exits successfully either way.
+
 ## CLI
 
 The CLI is the fastest way to check current allowance windows, reset times, and available headroom. It collects live data when needed and can emit JSON for scripts and other local tools.
