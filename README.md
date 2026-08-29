@@ -104,6 +104,28 @@ answers 404 and every marker is dropped in silence — restart the service after
 upgrading. Set `QUOTA_MARKER_DEBUG=1` to have the helper report a failed post on
 standard error; it still exits successfully either way.
 
+## Service status and restart
+
+The dashboard's **Service status** panel reads `GET /status`, which reports the
+running build, pid, uptime, listener, database path, retention mode, stored
+lifecycle-marker count, and per-provider collection health. A stale process
+(one started before a feature landed) is visible there as a version mismatch
+rather than as a silent 404.
+
+The panel's **Restart service** button posts to `POST /restart`. The route only
+answers a loopback peer, requires an `x-quota-restart: 1` header (which forces
+a CORS preflight this server never answers, so no other site in your browser
+can trigger it), and rejects a cross-origin `Origin`. The process replies,
+stops accepting connections, hands the port to a detached successor started
+from the same command and environment, and exits. Under a supervisor (launchd,
+or `QUOTA_SUPERVISED=1`) it exits without spawning, leaving the restart to the
+job manager. From a terminal:
+
+```bash
+curl -sS -X POST -H 'x-quota-restart: 1' http://127.0.0.1:8787/restart | jq
+```
+
+
 ## CLI
 
 The CLI is the fastest way to check current allowance windows, reset times, and available headroom. It collects live data when needed and can emit JSON for scripts and other local tools.

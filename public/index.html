@@ -34,6 +34,24 @@
       <!-- provider cards injected by app.js -->
     </section>
 
+    <section class="panel service-panel" aria-labelledby="service-title">
+      <div class="service-intro">
+        <span class="reference-kicker">process</span>
+        <h2 class="panel-title" id="service-title">Service status</h2>
+        <p class="panel-hint">Live state of the process behind this dashboard — build, listener, storage, and per-provider collection health.</p>
+        <div class="service-control">
+          <button id="restart-service" class="restart-button" type="button" data-stage="idle">Restart service</button>
+          <p class="service-note" id="restart-note" aria-live="polite">Replaces the running process and rebinds the port. Requests in flight are dropped.</p>
+        </div>
+      </div>
+      <div class="service-body">
+        <dl class="service-grid" id="service-grid">
+          <div class="service-field"><dt>status</dt><dd class="muted">loading…</dd></div>
+        </dl>
+        <div class="service-providers" id="service-providers"></div>
+      </div>
+    </section>
+
     <section class="panel estimate-panel" aria-label="estimate and recommend">
       <div class="estimate-intro">
         <h2 class="panel-title">Estimate &amp; recommend</h2>
@@ -125,11 +143,11 @@
         <article class="command-row">
           <div class="command-meta">
             <span class="command-index">06</span>
-            <div><strong>Restart local service</strong><span>Find this installation's launchd job and reload it</span></div>
+            <div><strong>Restart local service</strong><span>Same handoff as the Restart service button above</span></div>
           </div>
           <div class="command-shell">
-            <span class="command-type is-cli">CLI</span>
-            <code data-command="job=&quot;$(launchctl list | awk '$3 ~ /quota-service$/ {print $3; exit}')&quot;; test -n &quot;$job&quot; &amp;&amp; launchctl kickstart -k &quot;gui/$(id -u)/$job&quot;">job=&quot;$(launchctl list | awk '$3 ~ /quota-service$/ {print $3; exit}')&quot;; test -n &quot;$job&quot; &amp;&amp; launchctl kickstart -k &quot;gui/$(id -u)/$job&quot;</code>
+            <span class="command-type is-http">HTTP</span>
+            <code data-command-template="curl -sS -X POST -H 'x-quota-restart: 1' {origin}/restart | jq"></code>
             <button class="copy-command" type="button" aria-label="Copy local service restart command">Copy</button>
           </div>
         </article>

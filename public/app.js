@@ -728,6 +728,169 @@ document.getElementById("cards").addEventListener("submit", async (e) => {
   }
 });
 
+// ---------- service status panel ----------
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]
+  ));
+}
+
+function fmtUptime(ms) {
+  if (ms == null) return "unknown";
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ${sec % 60}s`;
+  const hr = Math.floor(min / 60);
+  if (hr < 48) return `${hr}h ${min % 60}m`;
+  return `${Math.floor(hr / 24)}d ${hr % 24}h`;
+}
+
+function fmtStamp(ts) {
+  if (ts == null) return "—";
+  return `${new Date(ts).toLocaleString()} · ${fmtAge(Date.now() - ts)}`;
+}
+
+function serviceFields(status) {
+  const retention = status.retention
+    ? status.retention.mode === "forever" ? "forever (no pruning)" : `${status.retention.days} days`
+    : "—";
+  const markers = status.markers
+    ? status.markers.count === 0
+      ? "0 recorded — Claude hooks are not reaching this service"
+      : `${status.markers.count.toLocaleString()} · last ${fmtStamp(status.markers.lastOccurredAt)}`
+    : "table not present in this database";
+  const restart = status.restart
+    ? status.restart.strategy === "supervisor"
+      ? "supervised — the job manager restarts it"
+      : "self-respawning"
+    : "—";
+  return [
+    ["build", `v${status.version}`],
+    ["process", `pid ${status.pid}`],
+    ["uptime", fmtUptime(status.uptimeMs)],
+    ["started", fmtStamp(status.startedAt)],
+    ["listening on", status.listen ? `${status.listen.host}:${status.listen.port}` : "—"],
+    ["poll interval", `${Math.round(status.pollMs / 1000)}s`],
+    ["retention", retention],
+    ["database", status.dbPath ?? "—"],
+    ["providers enabled", status.enabledProviders.join(" · ")],
+    ["restart mode", restart],
+    ["lifecycle markers", markers],
+  ];
+}
+
+const FRESHNESS_STATUS = { current: "ok", stale: "stale", unavailable: "unavailable" };
+
+function renderServiceStatus(status) {
+  document.getElementById("service-grid").innerHTML = serviceFields(status)
+    .map(([label, value]) => `
+      <div class="service-field">
+        <dt>${escapeHtml(label)}</dt>
+        <dd>${escapeHtml(value)}</dd>
+      </div>`)
+    .join("");
+
+  const providers = status.providers ?? [];
+  document.getElementById("service-providers").innerHTML = providers.length === 0 ? "" : `
+    <h3 class="service-subhead">Collection health</h3>
+    <div class="service-health">
+      ${providers.map((provider) => `
+        <article class="service-health-row" data-freshness="${escapeHtml(provider.freshness)}">
+          <div class="service-health-head">
+            <strong>${escapeHtml(provider.provider)}</strong>
+            ${statusPill(FRESHNESS_STATUS[provider.freshness] ?? "unknown")}
+          </div>
+          <dl>
+            <div><dt>last observation</dt><dd>${escapeHtml(fmtStamp(provider.lastObservationAt))}</dd></div>
+            <div><dt>last success</dt><dd>${escapeHtml(fmtStamp(provider.lastSuccessAt))}</dd></div>
+            <div><dt>last attempt</dt><dd>${escapeHtml(fmtStamp(provider.lastAttemptAt))}</dd></div>
+          </dl>
+          ${provider.failureReason ? `<p class="service-health-error">${escapeHtml(provider.failureReason)}</p>` : ""}
+        </article>`).join("")}
+    </div>`;
+}
+
+async function loadStatus() {
+  try {
+    const res = await fetch("/status", { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    renderServiceStatus(await res.json());
+  } catch (err) {
+    document.getElementById("service-grid").innerHTML =
+      `<div class="service-field"><dt>status</dt><dd>Unreachable — ${escapeHtml(err.message ?? err)}</dd></div>`;
+    document.getElementById("service-providers").innerHTML = "";
+  }
+}
+
+const RESTART_IDLE_NOTE = "Replaces the running process and rebinds the port. Requests in flight are dropped.";
+let restartConfirmTimer = null;
+
+function resetRestartButton(button, note, message = RESTART_IDLE_NOTE) {
+  clearTimeout(restartConfirmTimer);
+  button.dataset.stage = "idle";
+  button.disabled = false;
+  button.textContent = "Restart service";
+  note.textContent = message;
+}
+
+/** The service is down between the two processes, so a failed fetch here is
+ * expected rather than an error; only a status answering with a different pid
+ * proves the successor took the port. */
+async function waitForSuccessor(previousPid, timeoutMs = 25_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    try {
+      const res = await fetch("/status", { cache: "no-store" });
+      if (!res.ok) continue;
+      const status = await res.json();
+      if (status.pid !== previousPid) return status;
+    } catch {
+      // still restarting
+    }
+  }
+  return null;
+}
+
+async function restartService() {
+  const button = document.getElementById("restart-service");
+  const note = document.getElementById("restart-note");
+
+  if (button.dataset.stage !== "confirm") {
+    button.dataset.stage = "confirm";
+    button.textContent = "Confirm restart";
+    note.textContent = "Click again within 5 seconds to restart this service.";
+    restartConfirmTimer = setTimeout(() => resetRestartButton(button, note), 5_000);
+    return;
+  }
+
+  clearTimeout(restartConfirmTimer);
+  button.dataset.stage = "working";
+  button.disabled = true;
+  button.textContent = "Restarting…";
+
+  try {
+    const res = await fetch("/restart", { method: "POST", headers: { "x-quota-restart": "1" } });
+    const body = await res.json();
+    if (!res.ok || !body.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+    note.textContent = `pid ${body.pid} is exiting; waiting for the successor to bind port ${body.port}…`;
+    const status = await waitForSuccessor(body.pid);
+    if (!status) {
+      resetRestartButton(button, note, `pid ${body.pid} exited but nothing answered on port ${body.port}. Check ~/.quota-service/quota-service.err.log.`);
+      return;
+    }
+    renderServiceStatus(status);
+    loadUsage();
+    resetRestartButton(button, note, `Restarted — now pid ${status.pid} running v${status.version}.`);
+  } catch (err) {
+    resetRestartButton(button, note, `Restart failed: ${err.message ?? err}`);
+  }
+}
+
+document.getElementById("restart-service").addEventListener("click", restartService);
+
 // ---------- boot ----------
 
 tickClock();
@@ -736,3 +899,5 @@ initializeCommandReference();
 initializeOverallPopover();
 loadUsage();
 setInterval(loadUsage, 30_000);
+loadStatus();
+setInterval(loadStatus, 30_000);

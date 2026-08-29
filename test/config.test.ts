@@ -32,12 +32,13 @@ describe("provider configuration", () => {
   });
 
   test("status exposes enabled providers in configured order", () => {
-    expect(buildServiceStatus(300_000, ["warp", "codex"], 1_000)).toEqual({
-      ok: true,
-      uptimeMs: 1_000,
-      pollMs: 300_000,
-      enabledProviders: ["warp", "codex"],
-    });
+    expect(buildServiceStatus({ pollMs: 300_000, enabledProviders: ["warp", "codex"], uptimeMs: 1_000 }))
+      .toMatchObject({
+        ok: true,
+        uptimeMs: 1_000,
+        pollMs: 300_000,
+        enabledProviders: ["warp", "codex"],
+      });
   });
 });
 

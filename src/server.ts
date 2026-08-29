@@ -9,6 +9,7 @@ import {
   getLifecycleMarkers,
   openDb,
   pruneHistory,
+  resolveDbPath,
   saveLifecycleMarker,
   setManualEntry,
   setPlanAssignment,
@@ -17,10 +18,11 @@ import { collectAll } from "./collect";
 import { normalizeAnthropicWebImport } from "./anthropic-web-import";
 import { buildResetsReport, buildUsageReport } from "./present";
 import { estimateCost, isValidTaskProfile, recommendModel } from "./estimation";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { collectRunHistory } from "./run-history";
 import { buildServiceStatus } from "./status";
 import { buildHistoryResponse, HistoryRequestError } from "./history";
+import { authorizeRestart, buildSuccessorCommand, restartStrategy, selfOrigins } from "./restart";
 import type { QuotaLifecycleMarker } from "./types";
 
 function parseArgs(argv: string[]): { host: string; port: number; pollMs: number } {
@@ -123,7 +125,13 @@ const server = Bun.serve({
       return Response.json(await collectRunHistory(url.searchParams.get("refresh") === "1"));
     }
     if (url.pathname === "/status") {
-      return Response.json(buildServiceStatus(pollMs, ENABLED_PROVIDERS, process.uptime() * 1000, db));
+      return Response.json(buildServiceStatus({
+        pollMs,
+        enabledProviders: ENABLED_PROVIDERS,
+        uptimeMs: process.uptime() * 1000,
+        db,
+        listen: { host, port },
+      }));
     }
     if (url.pathname === "/history") {
       try {
@@ -231,6 +239,38 @@ const server = Bun.serve({
         return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 400 });
       }
     }
+    if (url.pathname === "/restart" && req.method === "POST") {
+      const decision = authorizeRestart({
+        peerAddress: server.requestIP(req)?.address ?? null,
+        confirmHeader: req.headers.get("x-quota-restart"),
+        origin: req.headers.get("origin"),
+        selfOrigins: selfOrigins(host, port),
+      });
+      if (!decision.ok) {
+        return Response.json({ ok: false, error: decision.error }, { status: decision.status });
+      }
+      const strategy = restartStrategy();
+      // The reply has to leave before the process does, so the handoff runs on
+      // a timer: stop accepting new connections, hand the port to a successor
+      // this process no longer owns, and exit so the successor can bind it.
+      setTimeout(() => {
+        console.log(`[quota-service] restart requested (${strategy}); pid ${process.pid} exiting`);
+        try {
+          server.stop(false);
+          if (strategy === "respawn") {
+            Bun.spawn(buildSuccessorCommand({
+              execPath: process.execPath,
+              argv: process.argv.slice(1),
+              logDir: dirname(resolveDbPath()),
+            }), { cwd: process.cwd(), stdio: ["ignore", "ignore", "ignore"] }).unref();
+          }
+        } catch (err) {
+          console.error("[quota-service] restart spawn failed:", err instanceof Error ? err.message : err);
+        }
+        process.exit(0);
+      }, 150);
+      return Response.json({ ok: true, strategy, pid: process.pid, port });
+    }
     if (req.method === "GET") {
       return serveStatic(url.pathname);
     }
@@ -240,7 +280,7 @@ const server = Bun.serve({
 
 console.log(`quota-service listening on http://${server.hostname}:${server.port}`);
 console.log(`  polling every ${Math.round(pollMs / 1000)}s (respects per-provider poll floors)`);
-console.log(`  routes: GET /usage  GET /runs  GET /resets  GET /status  GET /history  GET/POST /markers  GET /estimate  GET /recommend  POST /manual  POST /anthropic-web-import`);
+console.log(`  routes: GET /usage  GET /runs  GET /resets  GET /status  GET /history  GET/POST /markers  GET /estimate  GET /recommend  POST /manual  POST /anthropic-web-import  POST /restart`);
 console.log(`  dashboard: http://${server.hostname}:${server.port}/`);
 if (host === "127.0.0.1" || host === "localhost") {
   console.log(`  bound to localhost only; pass --host <tailnet-ip> to expose on the tailnet`);
