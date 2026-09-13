@@ -4,6 +4,7 @@ import type { CollectorResult, UsageCredits, WindowQuota, WindowSnapshot } from 
 
 const KEYCHAIN_SERVICE = "Claude Code-credentials";
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
 
 // Community-reported safe interval; Claude Code's own User-Agent-gated bucket
 // gets aggressively rate limited below this. Enforced by the caller (server
@@ -92,8 +93,25 @@ interface OauthUsageResponse {
   spend?: OauthSpend | null;
 }
 
+interface OauthProfileResponse {
+  organization?: {
+    organization_type?: string | null;
+    rate_limit_tier?: string | null;
+  } | null;
+}
+
+type CredentialResult =
+  | { ok: true; oauth: ClaudeAiOauth & { accessToken: string } }
+  | { ok: false; denied: boolean; error: string };
+
+type AnthropicCollectorDependencies = {
+  readCredentials?: () => Promise<CredentialResult>;
+  request?: typeof globalThis.fetch;
+  now?: () => number;
+};
+
 async function readClaudeCodeCredentials(): Promise<
-  { ok: true; oauth: ClaudeAiOauth } | { ok: false; denied: boolean; error: string }
+  CredentialResult
 > {
   const kc = await readGenericPassword(KEYCHAIN_SERVICE);
   if (!kc.ok) {
@@ -113,7 +131,59 @@ async function readClaudeCodeCredentials(): Promise<
       error: 'keychain item "Claude Code-credentials" has no claudeAiOauth.accessToken (config error, not a crash)',
     };
   }
-  return { ok: true, oauth: parsed.claudeAiOauth };
+  return {
+    ok: true,
+    oauth: { ...parsed.claudeAiOauth, accessToken: parsed.claudeAiOauth.accessToken },
+  };
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/** Claude Code uses the same profile fields to distinguish its Max plans.
+ * Keep the normalized value stable for history consumers while retaining the
+ * provider's raw rate-limit tier beside it. */
+export function planTypeFromOauthProfile(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const organization = (body as OauthProfileResponse).organization;
+  if (!organization || typeof organization !== "object") return null;
+  const organizationType = nonEmptyString(organization.organization_type);
+  const rateLimitTier = nonEmptyString(organization.rate_limit_tier);
+  if (organizationType === "claude_max") {
+    if (rateLimitTier === "default_claude_max_5x") return "max_5x";
+    if (rateLimitTier === "default_claude_max_20x") return "max_20x";
+    return null;
+  }
+  if (organizationType === "claude_pro") return "pro";
+  if (organizationType === "claude_team") return "team";
+  if (organizationType === "claude_enterprise") return "enterprise";
+  return null;
+}
+
+async function fetchOauthProfile(
+  accessToken: string,
+  request: typeof globalThis.fetch,
+): Promise<{ planType: string | null; rateLimitTier: string | null } | null> {
+  try {
+    const response = await request(PROFILE_URL, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        "Cache-Control": "no-cache",
+        "User-Agent": claudeCodeUserAgent(),
+      },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as OauthProfileResponse;
+    return {
+      planType: planTypeFromOauthProfile(body),
+      rateLimitTier: nonEmptyString(body.organization?.rate_limit_tier),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** Generic across whatever per-model buckets `limits[]` carries — no
@@ -199,9 +269,12 @@ function claudeCodeUserAgent(): string {
   return `claude-code/${process.env.QUOTA_SERVICE_CLAUDE_CODE_VERSION ?? "2.1.206"}`;
 }
 
-export async function collectAnthropic(): Promise<CollectorResult> {
-  const capturedAt = Date.now();
-  const creds = await readClaudeCodeCredentials();
+export async function collectAnthropic(
+  dependencies: AnthropicCollectorDependencies = {},
+): Promise<CollectorResult> {
+  const request = dependencies.request ?? globalThis.fetch;
+  const capturedAt = (dependencies.now ?? Date.now)();
+  const creds = await (dependencies.readCredentials ?? readClaudeCodeCredentials)();
   if (!creds.ok) {
     return {
       provider: "anthropic",
@@ -216,15 +289,18 @@ export async function collectAnthropic(): Promise<CollectorResult> {
     };
   }
   try {
-    const res = await fetch(USAGE_URL, {
-      headers: {
-        Authorization: `Bearer ${creds.oauth.accessToken}`,
-        "anthropic-beta": "oauth-2025-04-20",
-        "User-Agent": claudeCodeUserAgent(),
-        "Content-Type": "application/json",
-      },
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
+    const [res, profile] = await Promise.all([
+      request(USAGE_URL, {
+        headers: {
+          Authorization: `Bearer ${creds.oauth.accessToken}`,
+          "anthropic-beta": "oauth-2025-04-20",
+          "User-Agent": claudeCodeUserAgent(),
+          "Content-Type": "application/json",
+        },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      }),
+      fetchOauthProfile(creds.oauth.accessToken, request),
+    ]);
     if (res.status === 401) {
       return {
         provider: "anthropic",
@@ -259,6 +335,10 @@ export async function collectAnthropic(): Promise<CollectorResult> {
         ...snapshot,
         extra: {
           ...snapshot.extra,
+          ...(profile?.planType
+            ? { planType: profile.planType, planSource: "oauth_profile" }
+            : {}),
+          rateLimitTier: profile?.rateLimitTier ?? null,
           subscriptionType: creds.oauth.subscriptionType ?? null,
         },
       },

@@ -73,8 +73,10 @@ most 5,000.
 `POST /manual` accepts `field: "plan_tier"` for effective-dated Claude or
 Warp tier assignments. `effectiveFrom` is epoch milliseconds and defaults to
 the write time. Assignments are append-only and finite retention never prunes
-them. Older observations keep the tier that applied when the service observed
-them.
+them. The Anthropic collector records the OAuth profile's specific `planType`
+when available, including `max_5x` and `max_20x`. That provider value takes
+precedence. Assignments backfill observations that have no specific plan or
+only the generic credential value `max`.
 
 ## Optional Claude lifecycle markers
 

@@ -82,20 +82,28 @@ function timeSource(source: string, dataAsOf: number | null): QuotaObservation["
   return "provider";
 }
 
-function providerPlan(snapshot: QuotaSnapshot): string | null {
+function providerPlan(snapshot: QuotaSnapshot): { id: string; specific: boolean } | null {
   if (snapshot.kind !== "window") return null;
-  const candidate = snapshot.extra?.planType ?? snapshot.extra?.subscriptionType;
-  return typeof candidate === "string" && candidate.trim() ? candidate.trim() : null;
+  const planType = snapshot.extra?.planType;
+  if (typeof planType === "string" && planType.trim()) {
+    return { id: planType.trim(), specific: true };
+  }
+  const subscriptionType = snapshot.extra?.subscriptionType;
+  return typeof subscriptionType === "string" && subscriptionType.trim()
+    ? { id: subscriptionType.trim(), specific: false }
+    : null;
 }
 
 export function normalizeSnapshotRow(db: Database, row: SnapshotRow): QuotaObservation {
   const snapshot = JSON.parse(row.snapshotJson) as QuotaSnapshot;
   const assigned = getPlanAssignmentAt(db, row.provider, row.observedAt);
   const reportedPlan = providerPlan(snapshot);
-  const plan = assigned
+  const plan = reportedPlan?.specific
+    ? { id: reportedPlan.id, label: reportedPlan.id, source: "provider" as const, effectiveFrom: null }
+    : assigned
     ? { id: assigned.planId, label: assigned.planLabel, source: "configured" as const, effectiveFrom: assigned.effectiveFrom }
     : reportedPlan
-      ? { id: reportedPlan, label: reportedPlan, source: "provider" as const, effectiveFrom: null }
+      ? { id: reportedPlan.id, label: reportedPlan.id, source: "provider" as const, effectiveFrom: null }
       : { id: null, label: null, source: "unknown" as const, effectiveFrom: null };
   const base = {
     schemaVersion: 1 as const,

@@ -127,6 +127,29 @@ describe("normalized quota history", () => {
     db.close();
   });
 
+  test("uses specific provider plans before configured historical backfills", () => {
+    const db = testDb();
+    const generic = windowResult("anthropic", 1_000);
+    generic.snapshot = { ...generic.snapshot!, extra: { subscriptionType: "max" } };
+    const specific = windowResult("anthropic", 3_000);
+    specific.snapshot = {
+      ...specific.snapshot!,
+      extra: { planType: "max_20x", subscriptionType: "max" },
+    };
+    saveSnapshot(db, generic);
+    saveSnapshot(db, specific);
+    setPlanAssignment(db, {
+      provider: "anthropic", planId: "max_5x", planLabel: "Claude Max 5x", effectiveFrom: 0,
+    }, 100);
+
+    const result = buildHistoryResponse(db, params({ provider: "anthropic", from: "0", to: "4000" }), ["anthropic"]);
+    expect(result.observations.map((row) => row.plan)).toEqual([
+      { id: "max_5x", label: "Claude Max 5x", source: "configured", effectiveFrom: 0 },
+      { id: "max_20x", label: "max_20x", source: "provider", effectiveFrom: null },
+    ]);
+    db.close();
+  });
+
   test("preserves Warp units and rejects conflicting stored percentages", () => {
     const db = testDb();
     const result: CollectorResult = {
