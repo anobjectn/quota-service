@@ -53,6 +53,22 @@ outside the configured window cannot be restored by changing the setting
 back to `forever`. Back up the SQLite database and its WAL before reducing
 retention. The service does not run `VACUUM` automatically.
 
+## Failed collections and stale readings
+
+A failed collection (for example, HTTP 429, an expired token, or a timeout)
+stores a row with no quota values. `GET /usage` then serves the newest row that
+has values. That provider report has `status: "stale"`,
+`servingLastGood: true`, `capturedAt` and `dataAgeMs` for the served reading,
+`lastAttemptAt` for the failed attempt, and the failure reason in `error`. If
+no earlier reading exists, the report has no values. `GET /resets` also lists
+the last known windows and gives the `capturedAt` of each.
+
+After consecutive Anthropic HTTP 429 responses, the collector doubles the
+three-minute poll floor for each 429, to a maximum of 20 minutes. The first
+successful read or other error restores the normal floor. The collector
+requests the OAuth profile only after a successful usage read. It reuses a
+profile result for six hours, or for 30 minutes after a failed profile read.
+
 ## Historical API
 
 `GET /history` returns normalized, chronological quota observations without

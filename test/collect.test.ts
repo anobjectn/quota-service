@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { collectAll, type CollectorRunners } from "../src/collect";
+import { anthropicPollFloorMs, collectAll, type CollectorRunners } from "../src/collect";
 import { saveSnapshot } from "../src/db";
 import type { CollectorResult, Provider } from "../src/types";
 
@@ -75,5 +75,38 @@ test("concurrent polls share one provider result and persist it once", async () 
 
   const row = db.query("SELECT COUNT(*) AS count FROM snapshots").get() as { count: number };
   expect(row.count).toBe(1);
+  db.close();
+});
+
+test("consecutive Anthropic rate limits back the poll floor off to a ceiling", () => {
+  const db = new Database(":memory:");
+  db.exec(`
+    CREATE TABLE snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL,
+      status TEXT NOT NULL,
+      source TEXT NOT NULL,
+      data_as_of INTEGER,
+      captured_at INTEGER NOT NULL,
+      snapshot_json TEXT,
+      error TEXT
+    )
+  `);
+  let at = 1_000;
+  const save = (error?: string) => {
+    at += 1_000;
+    saveSnapshot(db, { ...result("anthropic"), capturedAt: at, error });
+  };
+
+  save();
+  expect(anthropicPollFloorMs(db)).toBe(180_000);
+  save("oauth/usage HTTP 429");
+  expect(anthropicPollFloorMs(db)).toBe(360_000);
+  save("oauth/usage HTTP 429");
+  expect(anthropicPollFloorMs(db)).toBe(720_000);
+  save("oauth/usage HTTP 429");
+  expect(anthropicPollFloorMs(db)).toBe(20 * 60_000);
+  save("The operation timed out.");
+  expect(anthropicPollFloorMs(db)).toBe(180_000);
   db.close();
 });

@@ -104,10 +104,27 @@ type CredentialResult =
   | { ok: true; oauth: ClaudeAiOauth & { accessToken: string } }
   | { ok: false; denied: boolean; error: string };
 
+type OauthProfile = { planType: string | null; rateLimitTier: string | null };
+
+/** The plan tier changes rarely, but the profile call spends a request on
+ * every poll. Reuse a successful lookup for hours and a failed one for a
+ * shorter time, so the usage call is the only request on most polls. */
+const PROFILE_CACHE_MS = 6 * 60 * 60_000;
+const PROFILE_FAILURE_CACHE_MS = 30 * 60_000;
+
+export type OauthProfileCache = {
+  value: OauthProfile | null;
+  fetchedAt: number;
+} | null;
+
+const profileCache: { current: OauthProfileCache } = { current: null };
+
 type AnthropicCollectorDependencies = {
   readCredentials?: () => Promise<CredentialResult>;
   request?: typeof globalThis.fetch;
   now?: () => number;
+  /** Tests pass their own holder so the module cache does not leak between cases. */
+  profileCache?: { current: OauthProfileCache };
 };
 
 async function readClaudeCodeCredentials(): Promise<
@@ -161,10 +178,26 @@ export function planTypeFromOauthProfile(body: unknown): string | null {
   return null;
 }
 
+async function cachedOauthProfile(
+  accessToken: string,
+  request: typeof globalThis.fetch,
+  cache: { current: OauthProfileCache },
+  now: number,
+): Promise<OauthProfile | null> {
+  const cached = cache.current;
+  if (cached) {
+    const ttl = cached.value ? PROFILE_CACHE_MS : PROFILE_FAILURE_CACHE_MS;
+    if (now - cached.fetchedAt < ttl) return cached.value;
+  }
+  const value = await fetchOauthProfile(accessToken, request);
+  cache.current = { value, fetchedAt: now };
+  return value;
+}
+
 async function fetchOauthProfile(
   accessToken: string,
   request: typeof globalThis.fetch,
-): Promise<{ planType: string | null; rateLimitTier: string | null } | null> {
+): Promise<OauthProfile | null> {
   try {
     const response = await request(PROFILE_URL, {
       headers: {
@@ -289,18 +322,15 @@ export async function collectAnthropic(
     };
   }
   try {
-    const [res, profile] = await Promise.all([
-      request(USAGE_URL, {
-        headers: {
-          Authorization: `Bearer ${creds.oauth.accessToken}`,
-          "anthropic-beta": "oauth-2025-04-20",
-          "User-Agent": claudeCodeUserAgent(),
-          "Content-Type": "application/json",
-        },
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      }),
-      fetchOauthProfile(creds.oauth.accessToken, request),
-    ]);
+    const res = await request(USAGE_URL, {
+      headers: {
+        Authorization: `Bearer ${creds.oauth.accessToken}`,
+        "anthropic-beta": "oauth-2025-04-20",
+        "User-Agent": claudeCodeUserAgent(),
+        "Content-Type": "application/json",
+      },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
     if (res.status === 401) {
       return {
         provider: "anthropic",
@@ -325,6 +355,14 @@ export async function collectAnthropic(
     }
     const body = (await res.json()) as OauthUsageResponse;
     const snapshot = toWindowSnapshot(body);
+    // Only after a successful usage read: a rejected or rate-limited token
+    // gains nothing from a second request.
+    const profile = await cachedOauthProfile(
+      creds.oauth.accessToken,
+      request,
+      dependencies.profileCache ?? profileCache,
+      capturedAt,
+    );
     return {
       provider: "anthropic",
       status: "ok",

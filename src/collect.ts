@@ -4,7 +4,7 @@
 
 import { ENABLED_PROVIDERS } from "./config";
 import type { Database } from "bun:sqlite";
-import { getLatestSnapshot, recordProviderAttempt, saveResetCredits, saveSnapshot } from "./db";
+import { getLatestSnapshot, getRecentSnapshotErrors, recordProviderAttempt, saveResetCredits, saveSnapshot } from "./db";
 import { collectAnthropic, ANTHROPIC_POLL_FLOOR_MS } from "./collectors/anthropic";
 import { collectCodexFromApi, collectCodexResetCredits } from "./collectors/codex";
 import { collectWarp } from "./collectors/warp";
@@ -30,6 +30,25 @@ export const POLL_FLOORS_MS: Record<Provider, number> = {
  * top of (not instead of) each collector's own internal fetch timeout, as a
  * second line of defense. */
 const COLLECT_ATTEMPT_TIMEOUT_MS = 12_000;
+
+/** Ceiling for the Anthropic rate-limit back-off. Observed 429 streaks lasted
+ * 6 to 16 hours while the collector retried every ~3.5 minutes; each retry
+ * spends a request against the same rate limit. */
+const ANTHROPIC_RATE_LIMIT_MAX_BACKOFF_MS = 20 * 60_000;
+const RATE_LIMIT_ERROR = /\bHTTP 429\b/;
+
+/** The Anthropic poll floor, doubled for each consecutive HTTP 429 at the
+ * head of the history (6m, 12m, then the 20m ceiling). Derived from stored
+ * rows so the back-off survives a restart and applies to every caller. */
+export function anthropicPollFloorMs(db: Database): number {
+  let consecutive = 0;
+  for (const error of getRecentSnapshotErrors(db, "anthropic", 8)) {
+    if (!error || !RATE_LIMIT_ERROR.test(error)) break;
+    consecutive += 1;
+  }
+  if (consecutive === 0) return ANTHROPIC_POLL_FLOOR_MS;
+  return Math.min(ANTHROPIC_POLL_FLOOR_MS * 2 ** consecutive, ANTHROPIC_RATE_LIMIT_MAX_BACKOFF_MS);
+}
 
 function isWithinFloor(db: Database, provider: Provider, floorMs: number): boolean {
   const latest = getLatestSnapshot(db, provider);
@@ -109,7 +128,7 @@ export async function collectCodexAndSave(db: Database, opts: { force?: boolean 
 
 export async function collectAnthropicAndSave(db: Database, opts: { force?: boolean } = {}): Promise<CollectorResult> {
   const cached = getLatestSnapshot(db, "anthropic");
-  if (!opts.force && isWithinFloor(db, "anthropic", ANTHROPIC_POLL_FLOOR_MS)) {
+  if (!opts.force && isWithinFloor(db, "anthropic", anthropicPollFloorMs(db))) {
     return cached!;
   }
   return recollectOrServeStale(db, "anthropic", collectAnthropic, cached);
