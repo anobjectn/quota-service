@@ -4,7 +4,7 @@
 
 import type { Database } from "bun:sqlite";
 import { ENABLED_PROVIDERS } from "./config";
-import { getLatestResetCredits, getLatestSnapshot, getManualEntries } from "./db";
+import { getLatestResetCredits, getLatestSnapshot, getLatestSnapshotWithData, getManualEntries } from "./db";
 import { POLL_FLOORS_MS } from "./collect";
 import { finiteNumber, parseInstant, toUtcDateString } from "./lib/time";
 import type {
@@ -26,7 +26,15 @@ export interface ProviderReport {
   status: CollectorResult["status"] | "unknown";
   source: string | null;
   dataAgeMs: number | null;
+  /** When the served snapshot was collected. With `servingLastGood`, this is
+   * the last successful collection, not the newest attempt. */
   capturedAt: number | null;
+  /** When the collector last ran for this provider, successful or not. */
+  lastAttemptAt?: number | null;
+  /** True when the newest attempt returned no values and `snapshot` is the
+   * last successful reading. `status` is then "stale" and `error` holds the
+   * newest attempt's failure reason. */
+  servingLastGood?: boolean;
   snapshot: CollectorResult["snapshot"];
   error?: string;
   manualEntries: ManualEntry[];
@@ -68,6 +76,28 @@ function buildProviderReport(db: Database, provider: Provider, now: number): Pro
       anthropicWebCredits,
     };
   }
+  if (!latest.snapshot) {
+    const lastGood = getLatestSnapshotWithData(db, provider);
+    if (lastGood) {
+      // The newest attempt failed (HTTP 429, expired token, timeout) and
+      // stored no values. Serve the last reading under an explicit "stale"
+      // status with its real age, and keep the failure reason in `error`, so
+      // consumers show old numbers with a marker instead of an empty card.
+      return {
+        provider,
+        status: "stale",
+        source: lastGood.source,
+        dataAgeMs: now - (lastGood.dataAsOf ?? lastGood.capturedAt),
+        capturedAt: lastGood.capturedAt,
+        lastAttemptAt: latest.capturedAt,
+        servingLastGood: true,
+        snapshot: lastGood.snapshot,
+        error: latest.error ?? `latest ${provider} collection returned no data`,
+        manualEntries,
+        anthropicWebCredits,
+      };
+    }
+  }
   const dataAgeMs = latest.dataAsOf != null ? now - latest.dataAsOf : null;
   // The wedge signal is "how long since the poll loop last successfully ran
   // this provider's collector" (capturedAt), not "how old is the underlying
@@ -85,6 +115,8 @@ function buildProviderReport(db: Database, provider: Provider, now: number): Pro
     source: latest.source,
     dataAgeMs,
     capturedAt: latest.capturedAt,
+    lastAttemptAt: latest.capturedAt,
+    servingLastGood: false,
     snapshot: latest.snapshot,
     error: isStaleByAge
       ? `collector last ran ${Math.round(collectorAgeMs / 1000)}s ago, exceeding ${STALE_AGE_MULTIPLIER}x the ${provider} poll floor (${Math.round(floorMs! / 1000)}s) — poll loop may be stalled`
@@ -162,6 +194,9 @@ export interface ResetsReport {
     window: "fiveHour" | "weekly";
     usedPercent: number;
     resetsAt: number | null;
+    /** When this reading was collected. It can be older than the newest
+     * attempt when that attempt failed. */
+    capturedAt: number;
   }>;
   pools: Array<{
     provider: Provider;
@@ -170,6 +205,7 @@ export interface ResetsReport {
     usedPercent: number;
     refreshesAt: number | null;
     cadence?: string;
+    capturedAt: number;
   }>;
   codexBankedResetCredits: {
     availableCount: number | null;
@@ -189,7 +225,9 @@ export function buildResetsReport(
   const windows: ResetsReport["windows"] = [];
   const pools: ResetsReport["pools"] = [];
   for (const provider of providers) {
-    const latest = getLatestSnapshot(db, provider);
+    // A failed newest attempt stores no values; keep listing the last known
+    // windows (with their capture time) instead of dropping the provider.
+    const latest = getLatestSnapshotWithData(db, provider);
     if (!latest?.snapshot) continue;
     if (latest.snapshot.kind === "window") {
       if (latest.snapshot.fiveHour) {
@@ -198,6 +236,7 @@ export function buildResetsReport(
           window: "fiveHour",
           usedPercent: latest.snapshot.fiveHour.usedPercent,
           resetsAt: latest.snapshot.fiveHour.resetsAt,
+          capturedAt: latest.capturedAt,
         });
       }
       if (latest.snapshot.weekly) {
@@ -206,6 +245,7 @@ export function buildResetsReport(
           window: "weekly",
           usedPercent: latest.snapshot.weekly.usedPercent,
           resetsAt: latest.snapshot.weekly.resetsAt,
+          capturedAt: latest.capturedAt,
         });
       }
     } else if (latest.snapshot.kind === "pool") {
@@ -216,6 +256,7 @@ export function buildResetsReport(
         usedPercent: latest.snapshot.pool.usedPercent,
         refreshesAt: latest.snapshot.pool.refreshesAt,
         cadence: latest.snapshot.pool.cadence,
+        capturedAt: latest.capturedAt,
       });
     }
   }

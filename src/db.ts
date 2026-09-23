@@ -121,10 +121,42 @@ export function getLatestSnapshot(
   db: Database,
   provider: Provider,
 ): CollectorResult | null {
+  return readLatestSnapshotRow(db, provider, false);
+}
+
+/** The newest row that carries quota values. A failed attempt (HTTP 429,
+ * expired token, timeout) stores a row with no snapshot; readers that must
+ * keep showing the last reading use this instead of `getLatestSnapshot`. */
+export function getLatestSnapshotWithData(
+  db: Database,
+  provider: Provider,
+): CollectorResult | null {
+  return readLatestSnapshotRow(db, provider, true);
+}
+
+/** Error strings of the newest rows, newest first. The collect loop reads
+ * these to count consecutive rate-limit failures for its back-off. */
+export function getRecentSnapshotErrors(
+  db: Database,
+  provider: Provider,
+  limit: number,
+): Array<string | null> {
+  const rows = db
+    .query(`SELECT error FROM snapshots WHERE provider = ? ORDER BY captured_at DESC LIMIT ?`)
+    .all(provider, limit) as Array<{ error: string | null }>;
+  return rows.map((row) => row.error);
+}
+
+function readLatestSnapshotRow(
+  db: Database,
+  provider: Provider,
+  requireData: boolean,
+): CollectorResult | null {
   const row = db
     .query(
       `SELECT provider, status, source, data_as_of as dataAsOf, captured_at as capturedAt, snapshot_json as snapshotJson, error
-       FROM snapshots WHERE provider = ? ORDER BY captured_at DESC LIMIT 1`,
+       FROM snapshots WHERE provider = ?${requireData ? " AND snapshot_json IS NOT NULL" : ""}
+       ORDER BY captured_at DESC LIMIT 1`,
     )
     .get(provider) as
     | {

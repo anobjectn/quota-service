@@ -120,6 +120,7 @@ test("degraded file result preserves warning and weekly semantics through report
       window: "weekly",
       usedPercent: 86,
       resetsAt: 1_784_981_120_000,
+      capturedAt,
     },
   ]);
   db.close();
