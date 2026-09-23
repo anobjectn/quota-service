@@ -1,6 +1,6 @@
 # quota-service
 
-![Version 1.5.0](https://img.shields.io/badge/version-1.5.0-5c7cfa)
+![Version 1.5.1](https://img.shields.io/badge/version-1.5.1-5c7cfa)
 ![Runtime Bun](https://img.shields.io/badge/runtime-Bun-f9f1e1)
 ![Local-first](https://img.shields.io/badge/architecture-local--first-2d9d78)
 ![Read-only provider collection](https://img.shields.io/badge/provider%20collection-read--only-3b82f6)
