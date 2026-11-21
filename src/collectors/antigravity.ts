@@ -2,7 +2,7 @@
 //
 // Two tactics, tried in order:
 //   A. Local Antigravity `language_server` / `agy` Connect-RPC over loopback
-//      (127.0.0.1), discovered via `ps` + `lsof` with bounded timeouts.
+//      (127.0.0.1 / [::1]), discovered via `ps` + `lsof` with bounded timeouts.
 //   B. Read-only Cloud Code OAuth endpoints using existing local credentials
 //      (env vars or well-known local files). Never writes or refreshes tokens,
 //      never calls `onboardUser`, and never consumes credits.
@@ -14,7 +14,6 @@ import type { CollectorResult, WindowQuota, WindowSnapshot } from "../types";
 
 export const ANTIGRAVITY_POLL_FLOOR_MS = 60_000;
 
-const FETCH_TIMEOUT_MS = 10_000;
 const SUBPROCESS_TIMEOUT_MS = 5_000;
 /** Loopback RPCs answer in milliseconds; a port that holds the connection open
  * (e.g. a raw LSP socket) must not eat the collect-on-query budget. */
@@ -22,8 +21,14 @@ const LOCAL_FETCH_TIMEOUT_MS = 2_000;
 /** Total time for local discovery and probing, leaving room inside collect.ts's
  * 12s attempt ceiling for the Cloud Code OAuth fallback. */
 const LOCAL_PROBE_BUDGET_MS = 5_000;
+/** Per-request timeout for Cloud Code OAuth endpoints so a single stalled
+ * host (e.g. cloudcode-pa) leaves room for the daily quota endpoint. */
+const CLOUD_FETCH_TIMEOUT_MS = 3_500;
+/** Shared budget across all sequential Cloud Code OAuth calls so
+ * LOCAL_PROBE_BUDGET_MS (5s) + CLOUD_API_BUDGET_MS (6s) stays comfortably
+ * inside collect.ts's 12s attempt ceiling. */
+const CLOUD_API_BUDGET_MS = 6_000;
 
-const FIVE_HOUR_MAX_MS = 6 * 3600 * 1000;
 const WEEKLY_MIN_MS = 3 * 24 * 3600 * 1000;
 const FIVE_HOUR_MAX_SECONDS = 6 * 3600;
 const WEEKLY_MIN_SECONDS = 3 * 24 * 3600;
@@ -73,6 +78,13 @@ export type AntigravityCredentialResult =
   | { ok: true; credential: AntigravityOauthCredential }
   | { ok: false; error: string };
 
+export type LoopbackHost = "127.0.0.1" | "[::1]";
+
+export interface ListeningEndpoint {
+  host: LoopbackHost;
+  port: number;
+}
+
 export interface AntigravityCollectorDependencies {
   request?: typeof globalThis.fetch;
   now?: () => number;
@@ -83,6 +95,7 @@ export interface AntigravityCollectorDependencies {
   homedir?: () => string;
   arch?: string;
   localProbeBudgetMs?: number;
+  cloudApiBudgetMs?: number;
 }
 
 interface QuotaSummaryRemainingPayload {
@@ -92,6 +105,7 @@ interface QuotaSummaryRemainingPayload {
 }
 
 interface QuotaSummaryWindowPayload {
+  duration?: number | string | null;
   durationSeconds?: number | string | null;
   seconds?: number | string | null;
   displayName?: string | null;
@@ -224,24 +238,29 @@ function nonEmptyString(value: unknown): string | null {
 function parseTimestamp(value: unknown): number | null {
   if (value == null) return null;
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) return null;
-    return value > 0 && value < 1e12 ? Math.round(value * 1000) : value;
+    if (!Number.isFinite(value) || value <= 0) return null;
+    return value < 1e12 ? Math.round(value * 1000) : value;
   }
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (!trimmed) return null;
     if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
       const numeric = Number(trimmed);
-      if (!Number.isFinite(numeric)) return null;
-      return numeric > 0 && numeric < 1e12 ? Math.round(numeric * 1000) : numeric;
+      if (!Number.isFinite(numeric) || numeric <= 0) return null;
+      return numeric < 1e12 ? Math.round(numeric * 1000) : numeric;
     }
     return parseInstant(trimmed);
   }
   if (typeof value === "object") {
     const seconds = (value as { seconds?: unknown }).seconds;
     const nanos = (value as { nanos?: unknown }).nanos;
-    const secNum = typeof seconds === "number" ? seconds : typeof seconds === "string" ? Number(seconds) : NaN;
-    if (Number.isFinite(secNum)) {
+    const secNum =
+      typeof seconds === "number"
+        ? seconds
+        : typeof seconds === "string" && seconds.trim() !== ""
+          ? Number(seconds)
+          : NaN;
+    if (Number.isFinite(secNum) && secNum > 0) {
       const nanoNum = typeof nanos === "number" && Number.isFinite(nanos) ? nanos : 0;
       return Math.round(secNum * 1000 + nanoNum / 1e6);
     }
@@ -258,9 +277,7 @@ export function remainingFractionToUsedPercent(value: unknown): number | null {
   return used === 0 ? 0 : used;
 }
 
-/** Normalizes recognized Google / Antigravity plan or tier names to stable short IDs,
- * preserving unrecognized non-empty names trimmed as-is. */
-export function normalizeAntigravityPlanType(raw: string | null | undefined): string | null {
+function recognizeAntigravityPlanType(raw: string | null | undefined): string | null {
   const trimmed = nonEmptyString(raw);
   if (!trimmed) return null;
   const lower = trimmed.toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
@@ -274,7 +291,15 @@ export function normalizeAntigravityPlanType(raw: string | null | undefined): st
     return "standard";
   }
   if (lower === "free" || lower === "free tier" || lower === "legacy tier" || lower === "individual") return "free";
-  return trimmed;
+  return null;
+}
+
+/** Normalizes recognized Google / Antigravity plan or tier names to stable short IDs,
+ * preserving unrecognized non-empty names trimmed as-is. */
+export function normalizeAntigravityPlanType(raw: string | null | undefined): string | null {
+  const trimmed = nonEmptyString(raw);
+  if (!trimmed) return null;
+  return recognizeAntigravityPlanType(trimmed) ?? trimmed;
 }
 
 function extractPlanFromUserStatus(body: GetUserStatusResponse | null | undefined): PlanMetadata {
@@ -291,14 +316,14 @@ function extractPlanFromUserStatus(body: GetUserStatusResponse | null | undefine
     nonEmptyString(planInfo?.planName) ??
     nonEmptyString(planInfo?.productName) ??
     nonEmptyString(planInfo?.planShortName);
-  const tierIdPlanType = normalizeAntigravityPlanType(tierId);
-  const recognizedTierId = tierIdPlanType !== tierId ? tierIdPlanType : null;
-  const rawPlanName = tierName ?? planInfoName ?? tierId;
+  const recognizedTierId = recognizeAntigravityPlanType(tierId);
+  const rawPlanName = tierName ?? (recognizedTierId ? tierId : null) ?? planInfoName ?? tierId;
   const planType =
-    normalizeAntigravityPlanType(tierName) ??
+    recognizeAntigravityPlanType(tierName) ??
     recognizedTierId ??
+    tierName ??
     normalizeAntigravityPlanType(planInfoName) ??
-    tierIdPlanType;
+    tierId;
   return {
     planType,
     rawPlanName,
@@ -308,16 +333,36 @@ function extractPlanFromUserStatus(body: GetUserStatusResponse | null | undefine
 }
 
 function extractPlanFromLoadCodeAssist(body: LoadCodeAssistResponse | null | undefined): PlanMetadata {
-  const rawPlanName =
-    nonEmptyString(body?.paidTier?.name) ??
+  const paidTierName = nonEmptyString(body?.paidTier?.name);
+  const paidTierId = nonEmptyString(body?.paidTier?.id);
+  const planInfoName =
     nonEmptyString(body?.planInfo?.planDisplayName) ??
     nonEmptyString(body?.planInfo?.planName) ??
-    nonEmptyString(body?.planInfo?.planType) ??
-    nonEmptyString(body?.paidTier?.id) ??
-    nonEmptyString(body?.currentTier?.name) ??
-    nonEmptyString(body?.currentTier?.id);
-  const tierId = nonEmptyString(body?.paidTier?.id) ?? nonEmptyString(body?.currentTier?.id);
-  const planType = normalizeAntigravityPlanType(rawPlanName) ?? normalizeAntigravityPlanType(tierId);
+    nonEmptyString(body?.planInfo?.planType);
+  const currentTierName = nonEmptyString(body?.currentTier?.name);
+  const currentTierId = nonEmptyString(body?.currentTier?.id);
+
+  const recognizedPaidTierId = recognizeAntigravityPlanType(paidTierId);
+  const recognizedCurrentTierId = recognizeAntigravityPlanType(currentTierId);
+
+  const rawPlanName =
+    paidTierName ??
+    (recognizedPaidTierId ? paidTierId : null) ??
+    planInfoName ??
+    paidTierId ??
+    currentTierName ??
+    currentTierId;
+  const tierId = paidTierId ?? currentTierId;
+  const planType =
+    recognizeAntigravityPlanType(paidTierName) ??
+    recognizedPaidTierId ??
+    paidTierName ??
+    normalizeAntigravityPlanType(planInfoName) ??
+    recognizeAntigravityPlanType(currentTierName) ??
+    recognizedCurrentTierId ??
+    currentTierName ??
+    paidTierId ??
+    currentTierId;
   return {
     planType,
     rawPlanName,
@@ -334,10 +379,12 @@ function extractProjectId(body: LoadCodeAssistResponse | null | undefined): stri
 }
 
 function extractFlagValue(command: string, flagName: string): string | null {
-  const pattern = new RegExp(`(?:^|\\s)--${flagName}(?:=|\\s+)(?:"([^"]+)"|'([^']+)'|(\\S+))`);
+  const pattern = new RegExp(
+    `(?:^|\\s)--${flagName}(?:=(?:"([^"]+)"|'([^']+)'|(\\S+))|\\s+(?:"([^"]+)"|'([^']+)'|(?!--)(\\S+)))`,
+  );
   const match = command.match(pattern);
   if (!match) return null;
-  return nonEmptyString(match[1] ?? match[2] ?? match[3]);
+  return nonEmptyString(match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5] ?? match[6]);
 }
 
 function extractFirstToken(command: string): string {
@@ -355,6 +402,41 @@ function extractFirstToken(command: string): string {
   return space === -1 ? trimmed : trimmed.slice(0, space);
 }
 
+/** Matches an executable basename in `ps` command output, handling quoted paths,
+ * plain paths, and unquoted paths containing spaces (e.g. `/Applications/My Apps/.../agy`)
+ * without false positives on flag or path arguments passed to unrelated binaries. */
+function matchesExecutableBasename(command: string, basenamePattern: RegExp): boolean {
+  const trimmed = command.trim();
+  if (!trimmed) return false;
+  const firstToken = extractFirstToken(trimmed);
+  const firstBase = firstToken.split("/").pop() ?? "";
+  if (basenamePattern.test(firstBase)) return true;
+
+  // Unquoted paths with spaces from `ps` start with `/`, `./`, or `../`.
+  // Standard system binary dirs (/bin, /sbin, /usr/bin, /usr/sbin) do not host
+  // spaced subdirectories, which avoids matching e.g. `/usr/bin/vim notes/agy`.
+  if (
+    (!trimmed.startsWith("/") && !trimmed.startsWith("./") && !trimmed.startsWith("../")) ||
+    /^\/(?:usr\/)?s?bin\//i.test(trimmed)
+  ) {
+    return false;
+  }
+
+  const slashSegment = /\/([^/\s]+)(?=\s|$)/g;
+  let match: RegExpExecArray | null;
+  while ((match = slashSegment.exec(trimmed)) !== null) {
+    const candidate = match[1]!;
+    if (!basenamePattern.test(candidate)) continue;
+    const prefix = trimmed.slice(0, match.index);
+    // Reject if an earlier token already started arguments (flags, another path, or shell operators).
+    if (/\s+(?:-|\/|~\/|\.\.?\/|&&|\|\||[|;<>])/.test(prefix)) {
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
 /** Parses `ps -ax -o pid=,command=` output and returns candidate Antigravity processes. */
 export function parseAntigravityProcesses(psOutput: string): AntigravityProcessInfo[] {
   const found: AntigravityProcessInfo[] = [];
@@ -367,11 +449,10 @@ export function parseAntigravityProcesses(psOutput: string): AntigravityProcessI
     const command = match[2]!.trim();
     if (!Number.isSafeInteger(pid) || pid <= 0 || seenPids.has(pid)) continue;
 
-    const firstToken = extractFirstToken(command);
     const isLanguageServer =
-      /(?:^|\/|\s)language_server(?:_[a-z0-9_]+)?(?:\s|$)/i.test(command) &&
+      matchesExecutableBasename(command, /^language_server(?:_[a-z0-9_]+)?$/i) &&
       /antigravity/i.test(command);
-    const isAgy = /(?:^|\/)agy$/i.test(firstToken);
+    const isAgy = matchesExecutableBasename(command, /^agy$/i);
 
     if (!isLanguageServer && !isAgy) continue;
     seenPids.add(pid);
@@ -403,39 +484,75 @@ export function parseAntigravityProcesses(psOutput: string): AntigravityProcessI
   return found;
 }
 
-/** Parses `lsof -nP -iTCP -sTCP:LISTEN -a -p <pid>` output for loopback/wildcard TCP listening ports. */
-export function parseListeningPorts(lsofOutput: string): number[] {
-  const ports: number[] = [];
-  const seen = new Set<number>();
+/** Parses `lsof -nP -iTCP -sTCP:LISTEN -a -p <pid>` output for loopback/wildcard TCP
+ * listening endpoints, preserving `127.0.0.1` vs `[::1]` while deduplicating by port
+ * (preferring `127.0.0.1` when a dual-stack process binds both on the same port). */
+export function parseListeningEndpoints(lsofOutput: string): ListeningEndpoint[] {
+  const endpoints: ListeningEndpoint[] = [];
+  const indexByPort = new Map<number, number>();
   for (const line of lsofOutput.split(/\r?\n/)) {
-    const match = line.match(/(?:127\.0\.0\.1|\[::1\]|localhost|\*):(\d+)\s+\(LISTEN\)/i);
+    const match = line.match(/(127\.0\.0\.1|\[::1\]|localhost|\*):(\d+)\s+\(LISTEN\)/i);
     if (!match) continue;
-    const port = Number(match[1]);
-    if (Number.isInteger(port) && port >= 1 && port <= 65535 && !seen.has(port)) {
-      seen.add(port);
-      ports.push(port);
+    const rawHost = match[1]!.toLowerCase();
+    const port = Number(match[2]);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) continue;
+    const host: LoopbackHost =
+      rawHost === "[::1]" || (rawHost === "*" && /\bIPv6\b/i.test(line)) ? "[::1]" : "127.0.0.1";
+    const existingIdx = indexByPort.get(port);
+    if (existingIdx === undefined) {
+      indexByPort.set(port, endpoints.length);
+      endpoints.push({ host, port });
+    } else if (endpoints[existingIdx]!.host === "[::1]" && host === "127.0.0.1") {
+      endpoints[existingIdx] = { host, port };
     }
   }
-  return ports;
+  return endpoints;
 }
 
+/** Parses `lsof -nP -iTCP -sTCP:LISTEN -a -p <pid>` output for loopback/wildcard TCP listening ports. */
+export function parseListeningPorts(lsofOutput: string): number[] {
+  return parseListeningEndpoints(lsofOutput).map((endpoint) => endpoint.port);
+}
+
+/** Classifies cadence from remaining reset horizon only when unambiguous.
+ * Never guesses `fiveHour` from remaining time alone (a weekly bucket with <= 6h
+ * left before reset would be misclassified); only `>= 3 days` safely maps to `weekly`. */
 function classifyCadenceFromHorizon(resetsAt: number | null, now: number): Cadence {
   if (resetsAt === null) return "unknown";
   const horizonMs = resetsAt - now;
-  if (horizonMs < 0) return "unknown";
-  if (horizonMs <= FIVE_HOUR_MAX_MS) return "fiveHour";
   if (horizonMs >= WEEKLY_MIN_MS) return "weekly";
   return "unknown";
+}
+
+function parseDurationSeconds(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    const match = trimmed.match(/^(\d+(?:\.\d+)?)s?$/i);
+    if (!match) return null;
+    const numeric = Number(match[1]);
+    return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+  }
+  return null;
 }
 
 function classifyBucketCadence(bucket: QuotaSummaryBucketPayload, resetsAt: number | null, now: number): Cadence {
   const textParts: string[] = [];
   if (typeof bucket.window === "string") {
+    const dur = parseDurationSeconds(bucket.window);
+    if (dur !== null) {
+      if (dur <= FIVE_HOUR_MAX_SECONDS) return "fiveHour";
+      if (dur >= WEEKLY_MIN_SECONDS) return "weekly";
+    }
     textParts.push(bucket.window);
   } else if (bucket.window && typeof bucket.window === "object") {
-    const durRaw = bucket.window.durationSeconds ?? bucket.window.seconds;
-    const dur = typeof durRaw === "number" ? durRaw : typeof durRaw === "string" ? Number(durRaw) : NaN;
-    if (Number.isFinite(dur) && dur > 0) {
+    const dur =
+      parseDurationSeconds(bucket.window.durationSeconds) ??
+      parseDurationSeconds(bucket.window.seconds) ??
+      parseDurationSeconds(bucket.window.duration);
+    if (dur !== null) {
       if (dur <= FIVE_HOUR_MAX_SECONDS) return "fiveHour";
       if (dur >= WEEKLY_MIN_SECONDS) return "weekly";
     }
@@ -448,11 +565,13 @@ function classifyBucketCadence(bucket: QuotaSummaryBucketPayload, resetsAt: numb
     const s = nonEmptyString(field);
     if (s) textParts.push(s);
   }
-  const combined = textParts.join(" ");
-  if (/\b(?:5\s*h(?:our|r)?s?|five[_\s-]*hour|session|short[_\s-]*term|rolling[_\s-]*5)\b/i.test(combined)) {
+  // Normalize underscores/hyphens to spaces so identifiers like `gemini_5h` or
+  // `QUOTA_WINDOW_WEEKLY` match `\b` word boundaries cleanly.
+  const combined = textParts.join(" ").replace(/[_-]+/g, " ");
+  if (/\b(?:5\s*h(?:our|r)?s?|five\s+hour|session|short\s+term|rolling\s+5)\b/i.test(combined)) {
     return "fiveHour";
   }
-  if (/\b(?:7\s*d(?:ay)?s?|week(?:ly)?|seven[_\s-]*day)\b/i.test(combined)) {
+  if (/\b(?:7\s*d(?:ay)?s?|week(?:ly)?|seven\s+day)\b/i.test(combined)) {
     return "weekly";
   }
   return classifyCadenceFromHorizon(resetsAt, now);
@@ -724,29 +843,25 @@ function normalizeModelEntries(
 ): WindowSnapshot | null {
   if (entries.length === 0) return null;
 
-  let fiveHourIdx = -1;
-  let fiveHourPriority = -1;
   let weeklyIdx = -1;
   let weeklyPriority = -1;
 
+  // Horizon-only endpoints carry no explicit window duration, so we never guess
+  // `fiveHour` here; only a Gemini bucket resetting >= 3 days out safely maps to `weekly`.
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]!;
-    if (!entry.isGemini) continue;
+    if (!entry.isGemini || entry.cadence !== "weekly") continue;
     const priority = geminiRepresentativePriority(entry);
-    if (entry.cadence === "fiveHour" && priority > fiveHourPriority) {
-      fiveHourPriority = priority;
-      fiveHourIdx = i;
-    } else if (entry.cadence === "weekly" && priority > weeklyPriority) {
+    if (priority > weeklyPriority) {
       weeklyPriority = priority;
       weeklyIdx = i;
     }
   }
 
-  const fiveHour = fiveHourIdx >= 0 ? entries[fiveHourIdx]!.quota : null;
   const weekly = weeklyIdx >= 0 ? entries[weeklyIdx]!.quota : null;
 
   // Check if any label appears with multiple distinct cadences among remaining entries.
-  const remaining = entries.filter((_, idx) => idx !== fiveHourIdx && idx !== weeklyIdx);
+  const remaining = entries.filter((_, idx) => idx !== weeklyIdx);
   const labelCadences = new Map<string, Set<Cadence>>();
   for (const entry of remaining) {
     const set = labelCadences.get(entry.label) ?? new Set<Cadence>();
@@ -758,15 +873,15 @@ function normalizeModelEntries(
   for (const entry of remaining) {
     const hasMultiCadence = (labelCadences.get(entry.label)?.size ?? 0) > 1;
     const key =
-      hasMultiCadence && entry.cadence !== "unknown"
-        ? `${entry.label} (${entry.cadence === "fiveHour" ? "5h" : "weekly"})`
+      hasMultiCadence && entry.cadence === "weekly"
+        ? `${entry.label} (weekly)`
         : entry.label;
     insertModelWindow(modelWindows, key, entry.quota);
   }
 
   const snapshot: WindowSnapshot = {
     kind: "window",
-    fiveHour,
+    fiveHour: null,
     weekly,
     modelWindows,
     extra: buildExtra(plan, endpoint),
@@ -862,7 +977,7 @@ export function parseAntigravityOauthCredentials(
   } catch {
     return { ok: false, error: `Antigravity credentials at ${sourcePath} are not valid JSON` };
   }
-  if (!parsed || typeof parsed !== "object") {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return { ok: false, error: `Antigravity credentials at ${sourcePath} must be a JSON object` };
   }
   const root = parsed as Record<string, unknown>;
@@ -990,6 +1105,8 @@ async function defaultRunCommand(argv: string[], timeoutMs: number): Promise<Ant
       new Response(proc.stderr).text(),
       proc.exited,
     ]).then(([stdout, stderr, exitCode]) => ({ stdout, stderr, exitCode }));
+    // Prevent an unhandled rejection if killing the process after timeout aborts stream reads.
+    completed.catch(() => undefined);
 
     const outcome = await Promise.race([completed, timedOut]);
     if (timer) clearTimeout(timer);
@@ -1018,6 +1135,7 @@ function isRpcErrorCode(code: unknown): boolean {
 async function postLoopbackRpc(
   request: typeof globalThis.fetch,
   scheme: "https" | "http",
+  host: LoopbackHost,
   port: number,
   method: string,
   csrfToken: string | null,
@@ -1027,7 +1145,7 @@ async function postLoopbackRpc(
   if (timeoutMs <= 0) {
     return { ok: false, transportError: true, error: `${method}: local probe budget exhausted` };
   }
-  const url = `${scheme}://127.0.0.1:${port}${LOCAL_RPC_PREFIX}/${method}`;
+  const url = `${scheme}://${host}:${port}${LOCAL_RPC_PREFIX}/${method}`;
   const parsed = new URL(url);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -1041,8 +1159,9 @@ async function postLoopbackRpc(
     body: JSON.stringify(LOCAL_RPC_METADATA),
     signal: AbortSignal.timeout(timeoutMs),
   };
-  // Scope self-signed TLS acceptance strictly to 127.0.0.1 loopback HTTPS.
-  if (parsed.protocol === "https:" && parsed.hostname === "127.0.0.1") {
+  // Scope self-signed TLS acceptance strictly to loopback HTTPS (127.0.0.1 / [::1]).
+  const isLoopbackHost = parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]" || parsed.hostname === "::1";
+  if (parsed.protocol === "https:" && isLoopbackHost) {
     init.tls = { rejectUnauthorized: false };
   }
 
@@ -1052,7 +1171,7 @@ async function postLoopbackRpc(
       return { ok: false, transportError: false, error: `${method} HTTP ${res.status}` };
     }
     const json = (await res.json()) as unknown;
-    if (!json || typeof json !== "object") {
+    if (!json || typeof json !== "object" || Array.isArray(json)) {
       return { ok: false, transportError: false, error: `${method} returned non-object JSON` };
     }
     return { ok: true, status: res.status, body: json as Record<string, unknown> };
@@ -1068,12 +1187,13 @@ async function postLoopbackRpc(
 async function queryLocalTarget(
   request: typeof globalThis.fetch,
   scheme: "https" | "http",
+  host: LoopbackHost,
   port: number,
   csrfToken: string | null,
   capturedAt: number,
   deadline: number,
 ): Promise<{ snapshot: WindowSnapshot | null; transportError: boolean; error: string | null }> {
-  const summaryRes = await postLoopbackRpc(request, scheme, port, "RetrieveUserQuotaSummary", csrfToken, deadline);
+  const summaryRes = await postLoopbackRpc(request, scheme, host, port, "RetrieveUserQuotaSummary", csrfToken, deadline);
   if (!summaryRes.ok && summaryRes.transportError) {
     return { snapshot: null, transportError: true, error: summaryRes.error };
   }
@@ -1085,14 +1205,14 @@ async function queryLocalTarget(
       const baseSnapshot = normalizeQuotaSummary(payload, capturedAt, null, "RetrieveUserQuotaSummary");
       if (baseSnapshot) {
         // Enrich plan/tier from GetUserStatus on the same working loopback target (best-effort).
-        const statusRes = await postLoopbackRpc(request, scheme, port, "GetUserStatus", csrfToken, deadline);
+        const statusRes = await postLoopbackRpc(request, scheme, host, port, "GetUserStatus", csrfToken, deadline);
         if (statusRes.ok) {
           plan = extractPlanFromUserStatus(statusRes.body as GetUserStatusResponse);
         }
         return {
           snapshot: {
             ...baseSnapshot,
-            extra: buildExtra(plan, "RetrieveUserQuotaSummary"),
+            extra: buildExtra(plan, "RetrieveUserQuotaSummary", { loopbackHost: host }),
           },
           transportError: false,
           error: null,
@@ -1105,14 +1225,18 @@ async function queryLocalTarget(
   let planFromStatus: PlanMetadata | null = null;
   let lastError = summaryRes.ok ? "RetrieveUserQuotaSummary returned no usable quota groups" : summaryRes.error;
 
-  const statusRes = await postLoopbackRpc(request, scheme, port, "GetUserStatus", csrfToken, deadline);
+  const statusRes = await postLoopbackRpc(request, scheme, host, port, "GetUserStatus", csrfToken, deadline);
   if (statusRes.ok) {
     const statusBody = statusRes.body as GetUserStatusResponse;
     planFromStatus = extractPlanFromUserStatus(statusBody);
     const configs = statusBody.userStatus?.cascadeModelConfigData?.clientModelConfigs;
     const snapshot = normalizeModelConfigs(configs, capturedAt, planFromStatus, "GetUserStatus");
     if (snapshot) {
-      return { snapshot, transportError: false, error: null };
+      return {
+        snapshot: { ...snapshot, extra: { ...snapshot.extra, loopbackHost: host } },
+        transportError: false,
+        error: null,
+      };
     }
     lastError = nonEmptyString(statusBody.message) ?? "GetUserStatus returned no usable model quotas";
   } else {
@@ -1120,7 +1244,7 @@ async function queryLocalTarget(
   }
 
   // Fallback 2: GetCommandModelConfigs.
-  const cmdRes = await postLoopbackRpc(request, scheme, port, "GetCommandModelConfigs", csrfToken, deadline);
+  const cmdRes = await postLoopbackRpc(request, scheme, host, port, "GetCommandModelConfigs", csrfToken, deadline);
   if (cmdRes.ok) {
     const cmdBody = cmdRes.body as GetCommandModelConfigsResponse;
     const snapshot = normalizeModelConfigs(
@@ -1130,7 +1254,11 @@ async function queryLocalTarget(
       "GetCommandModelConfigs",
     );
     if (snapshot) {
-      return { snapshot, transportError: false, error: null };
+      return {
+        snapshot: { ...snapshot, extra: { ...snapshot.extra, loopbackHost: host } },
+        transportError: false,
+        error: null,
+      };
     }
     lastError = nonEmptyString(cmdBody.message) ?? "GetCommandModelConfigs returned no usable model quotas";
   } else {
@@ -1168,9 +1296,14 @@ async function collectFromLocalServer(
       ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", String(proc.pid)],
       Math.min(SUBPROCESS_TIMEOUT_MS, remainingMs()),
     );
-    const lsofPorts = lsof.exitCode === 0 ? parseListeningPorts(lsof.stdout) : [];
+    if (remainingMs() <= 0) {
+      lastError = budgetError;
+      break;
+    }
+    const lsofEndpoints = lsof.exitCode === 0 ? parseListeningEndpoints(lsof.stdout) : [];
 
     interface LocalTarget {
+      host: LoopbackHost;
       port: number;
       schemes: Array<"https" | "http">;
       csrfToken: string | null;
@@ -1180,15 +1313,22 @@ async function collectFromLocalServer(
     const seenPorts = new Set<number>();
 
     // Try non-extension listening ports first (HTTPS with self-signed loopback cert, then HTTP fallback).
-    for (const port of lsofPorts) {
-      if (port === proc.extensionServerPort) continue;
-      seenPorts.add(port);
-      targets.push({ port, schemes: ["https", "http"], csrfToken: proc.csrfToken });
+    for (const endpoint of lsofEndpoints) {
+      if (endpoint.port === proc.extensionServerPort) continue;
+      seenPorts.add(endpoint.port);
+      targets.push({
+        host: endpoint.host,
+        port: endpoint.port,
+        schemes: ["https", "http"],
+        csrfToken: proc.csrfToken,
+      });
     }
 
-    // Try extension server port (HTTP first, then HTTPS fallback).
+    // Try extension server port (HTTP first, then HTTPS fallback), preserving IPv6 host if lsof saw it.
     if (proc.extensionServerPort !== null && !seenPorts.has(proc.extensionServerPort)) {
+      const extEndpoint = lsofEndpoints.find((endpoint) => endpoint.port === proc.extensionServerPort);
       targets.push({
+        host: extEndpoint?.host ?? "127.0.0.1",
         port: proc.extensionServerPort,
         schemes: ["http", "https"],
         csrfToken: proc.extensionServerCsrfToken ?? proc.csrfToken,
@@ -1206,7 +1346,15 @@ async function collectFromLocalServer(
           lastError = budgetError;
           break probe;
         }
-        const outcome = await queryLocalTarget(request, scheme, target.port, target.csrfToken, capturedAt, deadline);
+        const outcome = await queryLocalTarget(
+          request,
+          scheme,
+          target.host,
+          target.port,
+          target.csrfToken,
+          capturedAt,
+          deadline,
+        );
         if (outcome.snapshot) {
           return {
             found: true,
@@ -1249,17 +1397,24 @@ async function postCloudCode(
   accessToken: string,
   arch: string,
   body: Record<string, unknown>,
+  deadline: number,
+  perCallCapMs: number,
 ): Promise<
   | { kind: "ok"; data: Record<string, unknown> }
   | { kind: "unauthorized" }
-  | { kind: "error"; message: string }
+  | { kind: "error"; message: string; budgetExhausted?: boolean }
 > {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    return { kind: "error", message: `${new URL(url).pathname}: Cloud Code API budget exhausted`, budgetExhausted: true };
+  }
+  const timeoutMs = Math.min(perCallCapMs, remaining);
   try {
     const res = await request(url, {
       method: "POST",
       headers: cloudCodeHeaders(accessToken, arch),
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (res.status === 401) {
       return { kind: "unauthorized" };
@@ -1268,7 +1423,7 @@ async function postCloudCode(
       return { kind: "error", message: `${new URL(url).pathname} HTTP ${res.status}` };
     }
     const json = (await res.json()) as unknown;
-    if (!json || typeof json !== "object") {
+    if (!json || typeof json !== "object" || Array.isArray(json)) {
       return { kind: "error", message: `${new URL(url).pathname} returned non-object JSON` };
     }
     return { kind: "ok", data: json as Record<string, unknown> };
@@ -1289,11 +1444,24 @@ function staleOauthResult(capturedAt: number, message: string): CollectorResult 
   };
 }
 
+function unavailableCloudResult(capturedAt: number, message: string): CollectorResult {
+  return {
+    provider: "antigravity",
+    status: "unavailable",
+    source: "antigravity_api",
+    dataAsOf: null,
+    capturedAt,
+    snapshot: null,
+    error: message,
+  };
+}
+
 async function collectFromCloudApi(
   request: typeof globalThis.fetch,
   credential: AntigravityOauthCredential,
   capturedAt: number,
   arch: string,
+  budgetMs: number,
 ): Promise<CollectorResult> {
   if (credential.expiresAt !== null && credential.expiresAt <= capturedAt) {
     return staleOauthResult(
@@ -1301,6 +1469,10 @@ async function collectFromCloudApi(
       "Antigravity OAuth access token expired — will self-heal on next Antigravity sign-in or use (no self-refresh by design)",
     );
   }
+
+  const deadline = Date.now() + budgetMs;
+  const perCallCapMs = Math.min(CLOUD_FETCH_TIMEOUT_MS, Math.max(1, Math.ceil(budgetMs * 0.6)));
+  const budgetError = `Cloud Code API exceeded its ${budgetMs}ms budget`;
 
   let project = credential.projectId;
   let plan: PlanMetadata | null = null;
@@ -1319,6 +1491,8 @@ async function collectFromCloudApi(
         pluginType: "GEMINI",
       },
     },
+    deadline,
+    perCallCapMs,
   );
   if (loadRes.kind === "unauthorized") {
     return staleOauthResult(
@@ -1334,6 +1508,10 @@ async function collectFromCloudApi(
     lastError = loadRes.message;
   }
 
+  if (Date.now() >= deadline) {
+    return unavailableCloudResult(capturedAt, budgetError);
+  }
+
   const projectPayload = project ? { project } : {};
 
   // Primary Cloud Code quota summary endpoint.
@@ -1343,6 +1521,8 @@ async function collectFromCloudApi(
     credential.accessToken,
     arch,
     projectPayload,
+    deadline,
+    perCallCapMs,
   );
   if (summaryRes.kind === "unauthorized") {
     return staleOauthResult(
@@ -1372,6 +1552,10 @@ async function collectFromCloudApi(
     lastError = summaryRes.message;
   }
 
+  if (Date.now() >= deadline) {
+    return unavailableCloudResult(capturedAt, budgetError);
+  }
+
   // Fallback 1: fetchAvailableModels.
   const modelsRes = await postCloudCode(
     request,
@@ -1379,6 +1563,8 @@ async function collectFromCloudApi(
     credential.accessToken,
     arch,
     projectPayload,
+    deadline,
+    perCallCapMs,
   );
   if (modelsRes.kind === "unauthorized") {
     return staleOauthResult(
@@ -1403,6 +1589,10 @@ async function collectFromCloudApi(
     lastError = modelsRes.message;
   }
 
+  if (Date.now() >= deadline) {
+    return unavailableCloudResult(capturedAt, budgetError);
+  }
+
   // Fallback 2: retrieveUserQuota.
   const quotaRes = await postCloudCode(
     request,
@@ -1410,6 +1600,8 @@ async function collectFromCloudApi(
     credential.accessToken,
     arch,
     projectPayload,
+    deadline,
+    perCallCapMs,
   );
   if (quotaRes.kind === "unauthorized") {
     return staleOauthResult(
@@ -1434,15 +1626,7 @@ async function collectFromCloudApi(
     lastError = quotaRes.message;
   }
 
-  return {
-    provider: "antigravity",
-    status: "unavailable",
-    source: "antigravity_api",
-    dataAsOf: null,
-    capturedAt,
-    snapshot: null,
-    error: lastError ?? "Cloud Code API returned no usable quota data",
-  };
+  return unavailableCloudResult(capturedAt, lastError ?? "Cloud Code API returned no usable quota data");
 }
 
 /** Public entry point: try local Antigravity language_server/agy first, then read-only Cloud Code OAuth fallback. */
@@ -1488,5 +1672,11 @@ export async function collectAntigravity(
     };
   }
 
-  return collectFromCloudApi(request, creds.credential, capturedAt, arch);
+  return collectFromCloudApi(
+    request,
+    creds.credential,
+    capturedAt,
+    arch,
+    dependencies.cloudApiBudgetMs ?? CLOUD_API_BUDGET_MS,
+  );
 }

@@ -6,6 +6,7 @@ import {
   normalizeQuotaSummary,
   parseAntigravityOauthCredentials,
   parseAntigravityProcesses,
+  parseListeningEndpoints,
   parseListeningPorts,
   remainingFractionToUsedPercent,
   type AntigravityCommandOutput,
@@ -49,7 +50,30 @@ describe("Antigravity process and port detection", () => {
     });
   });
 
-  test("parses deduplicated loopback listening ports from lsof output", () => {
+  test("detects unquoted agy and language_server paths with spaces without matching unrelated commands", () => {
+    const psOutput = [
+      "  101 /usr/bin/grep language_server antigravity",
+      "  102 /usr/bin/grep /Applications/My Apps/agy",
+      "  103 /usr/bin/vim notes/agy",
+      "  104 /opt/homebrew/bin/rg -n /Users/luis/My Tools/agy",
+      "  105 /Applications/My Apps/Antigravity/bin/agy serve --port 52100",
+      "  106 /Users/luis/Library/Application Support/Google Antigravity/language_server_macos_arm --csrf_token --extension_server_port 52200",
+      '  107 "/Users/luis/My Tools/agy" --serve',
+    ].join("\n");
+
+    const procs = parseAntigravityProcesses(psOutput);
+    expect(procs.map((p) => p.pid)).toEqual([106, 105, 107]);
+    expect(procs[0]).toMatchObject({
+      pid: 106,
+      kind: "language_server",
+      csrfToken: null,
+      extensionServerPort: 52200,
+    });
+    expect(procs[1]).toMatchObject({ pid: 105, kind: "agy", csrfToken: null });
+    expect(procs[2]).toMatchObject({ pid: 107, kind: "agy", csrfToken: null });
+  });
+
+  test("parses deduplicated loopback listening ports and endpoints preserving IPv4 vs IPv6", () => {
     const lsofOutput = [
       "COMMAND     PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME",
       "language_  404 luis   12u  IPv4 0x1234      0t0  TCP 127.0.0.1:54321 (LISTEN)",
@@ -57,9 +81,17 @@ describe("Antigravity process and port detection", () => {
       "language_  404 luis   14u  IPv4 0x1236      0t0  TCP 192.168.1.50:9999 (LISTEN)",
       "language_  404 luis   15u  IPv4 0x1237      0t0  TCP 127.0.0.1:54322 (ESTABLISHED)",
       "language_  404 luis   16u  IPv4 0x1238      0t0  TCP *:54323 (LISTEN)",
+      "language_  404 luis   17u  IPv6 0x1239      0t0  TCP [::1]:54324 (LISTEN)",
+      "language_  404 luis   18u  IPv6 0x1240      0t0  TCP *:54325 (LISTEN)",
     ].join("\n");
 
-    expect(parseListeningPorts(lsofOutput)).toEqual([54321, 54323]);
+    expect(parseListeningPorts(lsofOutput)).toEqual([54321, 54323, 54324, 54325]);
+    expect(parseListeningEndpoints(lsofOutput)).toEqual([
+      { host: "127.0.0.1", port: 54321 },
+      { host: "127.0.0.1", port: 54323 },
+      { host: "[::1]", port: 54324 },
+      { host: "[::1]", port: 54325 },
+    ]);
   });
 });
 
@@ -164,6 +196,87 @@ describe("Antigravity normalization helpers", () => {
       "Claude / GPT (weekly)": { usedPercent: 15, resetsAt: Date.parse(IN_5D) },
     });
     expect(snap!.extra?.planType).toBe("ultra");
+  });
+
+  test("classifies underscore-separated identifiers and protobuf duration strings without guessing fiveHour from short horizon", () => {
+    const snap = normalizeQuotaSummary(
+      {
+        groups: [
+          {
+            displayName: "Gemini",
+            buckets: [
+              // Underscore-only identifier and protobuf duration string ("18000s" = 5h)
+              {
+                bucketId: "gemini_5h",
+                window: { duration: "18000s" },
+                remainingFraction: 0.7,
+                resetTime: IN_3H,
+              },
+              {
+                bucketId: "gemini_weekly",
+                window: "QUOTA_WINDOW_WEEKLY",
+                remainingFraction: 0.8,
+                resetTime: IN_3H, // Even with 3h left, explicit weekly metadata wins
+              },
+              // Unlabeled bucket with <= 6h remaining must NOT be guessed as fiveHour
+              {
+                bucketId: "mystery_bucket",
+                remainingFraction: 0.5,
+                resetTime: IN_3H,
+              },
+            ],
+          },
+          {
+            displayName: "Gemini 4 Argon",
+            buckets: [
+              // Unset protobuf timestamp { seconds: 0 } yields resetsAt: null
+              {
+                bucketId: "argon_pool",
+                remainingFraction: 0.6,
+                resetTime: { seconds: 0, nanos: 0 },
+              },
+            ],
+          },
+        ],
+      },
+      NOW,
+    );
+
+    expect(snap).not.toBeNull();
+    expect(snap!.fiveHour).toEqual({ usedPercent: 30, resetsAt: Date.parse(IN_3H) });
+    expect(snap!.weekly).toEqual({ usedPercent: 20, resetsAt: Date.parse(IN_3H) });
+    expect(snap!.modelWindows).toEqual({
+      mystery_bucket: { usedPercent: 50, resetsAt: Date.parse(IN_3H) },
+      "Gemini 4 Argon": { usedPercent: 40, resetsAt: null },
+    });
+  });
+
+  test("never guesses fiveHour from <= 6h remaining time on an unlabeled QuotaSummary bucket", () => {
+    const snap = normalizeQuotaSummary(
+      {
+        groups: [
+          {
+            displayName: "Gemini",
+            buckets: [
+              {
+                bucketId: "primary_pool",
+                displayName: "Gemini Pro",
+                remainingFraction: 0.4,
+                resetTime: IN_3H,
+              },
+            ],
+          },
+        ],
+      },
+      NOW,
+    );
+
+    expect(snap).not.toBeNull();
+    expect(snap!.fiveHour).toBeNull();
+    expect(snap!.weekly).toBeNull();
+    expect(snap!.modelWindows).toEqual({
+      "Gemini Pro": { usedPercent: 60, resetsAt: Date.parse(IN_3H) },
+    });
   });
 });
 
@@ -342,6 +455,41 @@ describe("Antigravity Tactic A (antigravity_local)", () => {
 
     const idOnly = await collectWithUserTier({ id: "g1-ultra-tier" });
     expect(idOnly.snapshot?.extra).toMatchObject({ planType: "ultra", tierId: "g1-ultra-tier" });
+
+    const canonicalIdOnly = await collectWithUserTier({ id: "ultra" });
+    expect(canonicalIdOnly.snapshot?.extra).toMatchObject({ planType: "ultra", tierId: "ultra" });
+  });
+
+  test("connects to IPv6-only loopback ([::1]) listeners with loopback-scoped self-signed TLS", async () => {
+    const seenRequests: Array<{ url: string; tls: unknown }> = [];
+    const runCommand = async (argv: string[]): Promise<AntigravityCommandOutput> =>
+      argv[0] === "ps"
+        ? { exitCode: 0, stdout: "  910 /Applications/Antigravity.app/Contents/Resources/language_server_macos_arm --csrf_token v6-tok\n", stderr: "" }
+        : { exitCode: 0, stdout: "language_ 910 luis 10u IPv6 0x9 0t0 TCP [::1]:51099 (LISTEN)\n", stderr: "" };
+
+    const request = (async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
+      const url = String(input);
+      seenRequests.push({ url, tls: (init as { tls?: unknown } | undefined)?.tls });
+      if (url.startsWith("https://[::1]:51099/") && url.endsWith("/RetrieveUserQuotaSummary")) {
+        return Response.json({
+          groups: [{ displayName: "Gemini", buckets: [{ displayName: "5h", remainingFraction: 0.8, resetTime: IN_3H }] }],
+        });
+      }
+      if (url.startsWith("https://[::1]:51099/") && url.endsWith("/GetUserStatus")) {
+        return Response.json({ userStatus: { userTier: { id: "g1-pro-tier", name: "Google AI Pro" } } });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof globalThis.fetch;
+
+    const result = await collectAntigravity({ request, runCommand, now: () => NOW });
+    expect(result.status).toBe("ok");
+    expect(result.source).toBe("antigravity_local");
+    expect(seenRequests.map((r) => r.url)).toEqual([
+      "https://[::1]:51099/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
+      "https://[::1]:51099/exa.language_server_pb.LanguageServerService/GetUserStatus",
+    ]);
+    expect(seenRequests[0]!.tls).toEqual({ rejectUnauthorized: false });
+    expect(result.snapshot?.extra).toMatchObject({ planType: "pro", loopbackHost: "[::1]" });
   });
 
   test("bounds a hung local port by the probe budget and still reaches the OAuth fallback", async () => {
@@ -389,7 +537,7 @@ describe("Antigravity Tactic B (antigravity_api)", () => {
     stderr: "",
   });
 
-  test("reads OAuth credentials in priority order and parses antigravity-cli nested token shape", () => {
+  test("reads OAuth credentials in priority order, rejects arrays, and parses antigravity-cli nested token shape", () => {
     const parsed = parseAntigravityOauthCredentials(
       JSON.stringify({
         token: { access_token: "nested-tok", expiry: "2026-11-21T20:00:00Z" },
@@ -403,6 +551,22 @@ describe("Antigravity Tactic B (antigravity_api)", () => {
       expect(parsed.credential.accessToken).toBe("nested-tok");
       expect(parsed.credential.expiresAt).toBe(Date.parse("2026-11-21T20:00:00Z"));
       expect(parsed.credential.projectId).toBe("proj-123");
+    }
+
+    const arrayCreds = parseAntigravityOauthCredentials("[]", "inline");
+    expect(arrayCreds.ok).toBe(false);
+    if (!arrayCreds.ok) {
+      expect(arrayCreds.error).toContain("must be a JSON object");
+    }
+
+    // Epoch 0 / empty seconds must not be mistaken for an expired timestamp.
+    const zeroExpiry = parseAntigravityOauthCredentials(
+      JSON.stringify({ access_token: "tok", expiry: { seconds: "" } }),
+      "inline",
+    );
+    expect(zeroExpiry.ok).toBe(true);
+    if (zeroExpiry.ok) {
+      expect(zeroExpiry.credential.expiresAt).toBeNull();
     }
   });
 
@@ -523,7 +687,7 @@ describe("Antigravity Tactic B (antigravity_api)", () => {
     }
   });
 
-  test("falls back from retrieveUserQuotaSummary to fetchAvailableModels", async () => {
+  test("falls back from retrieveUserQuotaSummary to fetchAvailableModels without guessing fiveHour from <= 6h horizon", async () => {
     const urls: string[] = [];
     const request = (async (input: Parameters<typeof globalThis.fetch>[0]) => {
       const url = String(input);
@@ -531,7 +695,8 @@ describe("Antigravity Tactic B (antigravity_api)", () => {
       if (url.endsWith(":loadCodeAssist")) {
         return Response.json({
           cloudaicompanionProject: "proj-models",
-          planInfo: { planType: "g1-ultra-tier" },
+          paidTier: { id: "g1-ultra-tier" },
+          planInfo: { planDisplayName: "Pro" },
         });
       }
       if (url.endsWith(":retrieveUserQuotaSummary")) {
@@ -579,12 +744,15 @@ describe("Antigravity Tactic B (antigravity_api)", () => {
     ]);
     expect(result.snapshot?.kind).toBe("window");
     if (result.snapshot?.kind === "window") {
-      expect(result.snapshot.fiveHour).toEqual({ usedPercent: 40, resetsAt: Date.parse(IN_3H) });
+      // Never guess fiveHour from remaining time <= 6h on horizon-only endpoints.
+      expect(result.snapshot.fiveHour).toBeNull();
       expect(result.snapshot.weekly).toBeNull();
       expect(result.snapshot.modelWindows).toEqual({
+        "Gemini 3 Pro": { usedPercent: 40, resetsAt: Date.parse(IN_3H) },
         "Gemini 3 Flash": { usedPercent: 10, resetsAt: Date.parse(IN_3H) },
         "Claude Sonnet": { usedPercent: 75, resetsAt: Date.parse(IN_5D) },
       });
+      // Recognized paidTier.id beats generic planInfo.planDisplayName.
       expect(result.snapshot.extra?.planType).toBe("ultra");
     }
   });
@@ -637,13 +805,71 @@ describe("Antigravity Tactic B (antigravity_api)", () => {
     ]);
     expect(result.snapshot?.kind).toBe("window");
     if (result.snapshot?.kind === "window") {
-      expect(result.snapshot.fiveHour).toEqual({ usedPercent: 25, resetsAt: Date.parse(IN_3H) });
+      expect(result.snapshot.fiveHour).toBeNull();
       expect(result.snapshot.weekly).toEqual({ usedPercent: 50, resetsAt: Date.parse(IN_5D) });
       expect(result.snapshot.modelWindows).toEqual({
+        "Gemini 3 Pro": { usedPercent: 25, resetsAt: Date.parse(IN_3H) },
         "Gemini 4 Argon": { usedPercent: 80, resetsAt: Date.parse(IN_5D) },
       });
       expect(result.snapshot.extra?.planType).toBe("standard");
     }
+  });
+
+  test("bounds sequential Cloud Code OAuth calls within the shared API budget", async () => {
+    // Case 1: loadCodeAssist stalls, per-call cap aborts it and leaves room for retrieveUserQuotaSummary.
+    const partialRequest = (async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith(":loadCodeAssist")) {
+        return new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      }
+      if (url.endsWith(":retrieveUserQuotaSummary")) {
+        return Response.json({
+          groups: [{ displayName: "Gemini", buckets: [{ displayName: "5h", remainingFraction: 0.7, resetTime: IN_3H }] }],
+        });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof globalThis.fetch;
+
+    const partialStart = Date.now();
+    const partialResult = await collectAntigravity({
+      request: partialRequest,
+      runCommand: noLocalServer,
+      now: () => NOW,
+      cloudApiBudgetMs: 250,
+      env: {
+        ANTIGRAVITY_OAUTH_CREDENTIALS_JSON: JSON.stringify({ access_token: "tok", expiry_date: NOW + 3600_000 }),
+      },
+    });
+    expect(Date.now() - partialStart).toBeLessThan(1_500);
+    expect(partialResult.status).toBe("ok");
+    expect(partialResult.source).toBe("antigravity_api");
+
+    // Case 2: all Cloud Code calls stall; total time stays bounded and returns unavailable cleanly.
+    const hungCalls: string[] = [];
+    const hungRequest = (async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
+      hungCalls.push(String(input));
+      return new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    }) as typeof globalThis.fetch;
+
+    const hungStart = Date.now();
+    const hungResult = await collectAntigravity({
+      request: hungRequest,
+      runCommand: noLocalServer,
+      now: () => NOW,
+      cloudApiBudgetMs: 200,
+      env: {
+        ANTIGRAVITY_OAUTH_CREDENTIALS_JSON: JSON.stringify({ access_token: "tok", expiry_date: NOW + 3600_000 }),
+      },
+    });
+    expect(Date.now() - hungStart).toBeLessThan(1_500);
+    expect(hungResult.status).toBe("unavailable");
+    expect(hungResult.source).toBe("antigravity_api");
+    expect(hungResult.error).toContain("budget");
+    expect(hungCalls.length).toBeLessThanOrEqual(2);
   });
 
   test("returns unavailable cleanly when neither local server nor OAuth credentials exist", async () => {
