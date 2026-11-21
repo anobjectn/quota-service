@@ -117,7 +117,7 @@ export function normalizeSnapshotRow(db: Database, row: SnapshotRow): QuotaObser
   };
 
   if (snapshot.kind === "window") {
-    const windows = (["fiveHour", "weekly"] as const).flatMap((id) => {
+    const primaryWindows = (["fiveHour", "weekly"] as const).flatMap((id) => {
       const window = snapshot[id];
       if (!window || !Number.isFinite(window.usedPercent)) return [];
       return [{
@@ -127,7 +127,19 @@ export function normalizeSnapshotRow(db: Database, row: SnapshotRow): QuotaObser
         cycleId: cycleId(window.resetsAt, row.observedAt),
       }];
     });
-    return { ...base, quota: { kind: "windows", windows } };
+    const modelWindows = snapshot.modelWindows && typeof snapshot.modelWindows === "object"
+      ? Object.entries(snapshot.modelWindows).flatMap(([name, window]) => {
+          if (!window || !Number.isFinite(window.usedPercent)) return [];
+          const resetsAt = window.resetsAt ?? null;
+          return [{
+            id: `model:${name}`,
+            usedPercent: window.usedPercent,
+            resetsAt,
+            cycleId: cycleId(resetsAt, row.observedAt),
+          }];
+        })
+      : [];
+    return { ...base, quota: { kind: "windows", windows: [...primaryWindows, ...modelWindows] } };
   }
 
   const { used, limit, usedPercent: storedPercent, refreshesAt, cadence } = snapshot.pool;

@@ -260,7 +260,7 @@ bun run serve
 
 ## Local data and credentials
 
-The repository ignores `.env`, `data/`, and SQLite database files. Collected snapshots are stored locally in `~/.quota-service/quota.db` by default. Provider credentials are read from existing local Codex and macOS Keychain sources and are not persisted by this service.
+The repository ignores `.env`, `data/`, and SQLite database files. Collected snapshots are stored locally in `~/.quota-service/quota.db` by default. Provider credentials are read from existing local provider sources and are not persisted by this service.
 
 Each provider assumes a single signed-in account: Codex credentials come from `~/.codex/auth.json`, Anthropic credentials come from the macOS Keychain item Claude Code writes, and Antigravity reads either the running local Antigravity `language_server`/`agy` Connect-RPC server over loopback (`127.0.0.1` / `[::1]`) or read-only Cloud Code OAuth credentials from `ANTIGRAVITY_OAUTH_CREDENTIALS_JSON`, `QUOTA_ANTIGRAVITY_AUTH_PATH`, `~/.gemini/antigravity-cli/antigravity-oauth-token`, `~/.gemini/oauth_creds.json`, or `~/.codexbar/antigravity/oauth_creds.json` (never refreshing or writing tokens on disk). If you use more than one account on the same provider, quota-service reports whichever one is currently signed in on this machine — it does not track multiple accounts per provider separately.
 

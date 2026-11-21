@@ -3,11 +3,11 @@ import {
   ANTIGRAVITY_POLL_FLOOR_MS,
   collectAntigravity,
   normalizeAntigravityPlanType,
+  normalizeAvailableModels,
   normalizeQuotaSummary,
   parseAntigravityOauthCredentials,
   parseAntigravityProcesses,
   parseListeningEndpoints,
-  parseListeningPorts,
   remainingFractionToUsedPercent,
   type AntigravityCommandOutput,
 } from "../src/collectors/antigravity";
@@ -56,6 +56,10 @@ describe("Antigravity process and port detection", () => {
       "  102 /usr/bin/grep /Applications/My Apps/agy",
       "  103 /usr/bin/vim notes/agy",
       "  104 /opt/homebrew/bin/rg -n /Users/luis/My Tools/agy",
+      "  108 /opt/homebrew/bin/nvim notes/agy",
+      "  109 /usr/local/bin/python3 scripts/agy",
+      "  110 /Users/luis/.bun/bin/bun run tools/agy",
+      "  111 /Applications/Windsurf.app/Contents/Resources/language_server_macos_arm --workspace_id file_Users_luis_Work_antigravity --csrf_token ws-tok",
       "  105 /Applications/My Apps/Antigravity/bin/agy serve --port 52100",
       "  106 /Users/luis/Library/Application Support/Google Antigravity/language_server_macos_arm --csrf_token --extension_server_port 52200",
       '  107 "/Users/luis/My Tools/agy" --serve',
@@ -73,7 +77,7 @@ describe("Antigravity process and port detection", () => {
     expect(procs[2]).toMatchObject({ pid: 107, kind: "agy", csrfToken: null });
   });
 
-  test("parses deduplicated loopback listening ports and endpoints preserving IPv4 vs IPv6", () => {
+  test("parses deduplicated loopback listening endpoints preserving IPv4 vs IPv6", () => {
     const lsofOutput = [
       "COMMAND     PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME",
       "language_  404 luis   12u  IPv4 0x1234      0t0  TCP 127.0.0.1:54321 (LISTEN)",
@@ -85,7 +89,6 @@ describe("Antigravity process and port detection", () => {
       "language_  404 luis   18u  IPv6 0x1240      0t0  TCP *:54325 (LISTEN)",
     ].join("\n");
 
-    expect(parseListeningPorts(lsofOutput)).toEqual([54321, 54323, 54324, 54325]);
     expect(parseListeningEndpoints(lsofOutput)).toEqual([
       { host: "127.0.0.1", port: 54321 },
       { host: "127.0.0.1", port: 54323 },
@@ -278,12 +281,82 @@ describe("Antigravity normalization helpers", () => {
       "Gemini Pro": { usedPercent: 60, resetsAt: Date.parse(IN_3H) },
     });
   });
+
+  test("keeps non-5h/non-weekly explicit durations (60s, 3600s, 20d) in modelWindows and prefers structured labels over descriptions", () => {
+    const snap = normalizeQuotaSummary(
+      {
+        groups: [
+          {
+            displayName: "Gemini",
+            buckets: [
+              { bucketId: "rpm", window: "60s", remainingFraction: 0.1, resetTime: IN_3H },
+              { window: "3600s", remainingFraction: 0.5, resetTime: IN_3H },
+              { bucketId: "gemini_5h", window: "18000s", remainingFraction: 0.8, resetTime: IN_3H },
+              {
+                bucketId: "gemini_weekly",
+                displayName: "Weekly",
+                description: "Independent of 5h session limit",
+                remainingFraction: 0.65,
+                resetTime: IN_5D,
+              },
+              { bucketId: "monthly_cap", window: "1728000s", remainingFraction: 0.9, resetTime: IN_5D },
+            ],
+          },
+        ],
+      },
+      NOW,
+    );
+
+    expect(snap).not.toBeNull();
+    expect(snap!.fiveHour).toEqual({ usedPercent: 20, resetsAt: Date.parse(IN_3H) });
+    expect(snap!.weekly).toEqual({ usedPercent: 35, resetsAt: Date.parse(IN_5D) });
+    expect(snap!.modelWindows).toEqual({
+      rpm: { usedPercent: 90, resetsAt: Date.parse(IN_3H) },
+      "1h": { usedPercent: 50, resetsAt: Date.parse(IN_3H) },
+      monthly_cap: { usedPercent: 10, resetsAt: Date.parse(IN_5D) },
+    });
+
+    // Standalone 1h bucket stays in modelWindows without populating fiveHour.
+    const oneHourOnly = normalizeQuotaSummary(
+      { groups: [{ displayName: "Gemini", buckets: [{ window: "3600s", remainingFraction: 0.5 }] }] },
+      NOW,
+    );
+    expect(oneHourOnly).not.toBeNull();
+    expect(oneHourOnly!.fiveHour).toBeNull();
+    expect(oneHourOnly!.modelWindows).toEqual({ "1h": { usedPercent: 50, resetsAt: null } });
+
+    // Malformed non-array buckets returns null cleanly instead of throwing.
+    expect(normalizeQuotaSummary({ groups: [{ buckets: {} as unknown as [] }] }, NOW)).toBeNull();
+  });
+
+  test("keeps per-model fallback horizons (2d, 4d, 20d) stably in modelWindows without jumping across cycles", () => {
+    for (const days of [2, 4, 20]) {
+      const reset = new Date(NOW + days * 24 * 3600 * 1000).toISOString();
+      const snap = normalizeAvailableModels(
+        {
+          models: {
+            "gemini-3-pro": {
+              displayName: "Gemini 3 Pro",
+              quotaInfo: { remainingFraction: 0.4, resetTime: reset },
+            },
+          },
+        },
+        NOW,
+      );
+      expect(snap).not.toBeNull();
+      expect(snap!.fiveHour).toBeNull();
+      expect(snap!.weekly).toBeNull();
+      expect(snap!.modelWindows).toEqual({
+        "Gemini 3 Pro": { usedPercent: 60, resetsAt: Date.parse(reset) },
+      });
+    }
+  });
 });
 
 describe("Antigravity Tactic A (antigravity_local)", () => {
   test("queries local RetrieveUserQuotaSummary over loopback HTTPS with self-signed TLS and enriches plan via GetUserStatus", async () => {
     expect(ANTIGRAVITY_POLL_FLOOR_MS).toBe(60_000);
-    const seenRequests: Array<{ url: string; headers: Record<string, string>; tls: unknown }> = [];
+    const seenRequests: Array<{ url: string; headers: Record<string, string>; tls: unknown; redirect: unknown }> = [];
 
     const runCommand = async (argv: string[]): Promise<AntigravityCommandOutput> => {
       if (argv[0] === "ps") {
@@ -306,6 +379,7 @@ describe("Antigravity Tactic A (antigravity_local)", () => {
         url,
         headers: (init?.headers ?? {}) as Record<string, string>,
         tls: (init as { tls?: unknown } | undefined)?.tls,
+        redirect: init?.redirect,
       });
       if (url.endsWith("/RetrieveUserQuotaSummary")) {
         return Response.json({
@@ -350,6 +424,46 @@ describe("Antigravity Tactic A (antigravity_local)", () => {
     expect(seenRequests[0]!.headers["Connect-Protocol-Version"]).toBe("1");
     expect(seenRequests[0]!.headers["X-Codeium-Csrf-Token"]).toBe("secret-csrf");
     expect(seenRequests[0]!.tls).toEqual({ rejectUnauthorized: false });
+    expect(seenRequests[0]!.redirect).toBe("error");
+  });
+
+  test("falls back from HTTP 400 to HTTPS on extensionServerPort when the server requires TLS", async () => {
+    const calls: string[] = [];
+    const runCommand = async (argv: string[]): Promise<AntigravityCommandOutput> =>
+      argv[0] === "ps"
+        ? {
+            exitCode: 0,
+            stdout: "  900 /Applications/Antigravity.app/Contents/Resources/bin/language_server --csrf_token tok --extension_server_port 51001\n",
+            stderr: "",
+          }
+        : {
+            exitCode: 0,
+            stdout: "language_ 900 luis 10u IPv4 0x1 0t0 TCP 127.0.0.1:51001 (LISTEN)\n",
+            stderr: "",
+          };
+
+    const request = (async (input: Parameters<typeof globalThis.fetch>[0]) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.startsWith("http://127.0.0.1:51001/")) {
+        return new Response("Client sent an HTTP request to an HTTPS server.\n", { status: 400 });
+      }
+      if (url.endsWith("/RetrieveUserQuotaSummary")) {
+        return Response.json({
+          groups: [{ displayName: "Gemini", buckets: [{ bucketId: "gemini_5h", window: "18000s", remainingFraction: 0.7, resetTime: IN_3H }] }],
+        });
+      }
+      return Response.json({});
+    }) as typeof globalThis.fetch;
+
+    const result = await collectAntigravity({ request, runCommand, now: () => NOW, env: {}, readFileText: async () => null });
+    expect(result.status).toBe("ok");
+    expect(result.source).toBe("antigravity_local");
+    expect(calls[0]).toStartWith("http://127.0.0.1:51001/");
+    expect(calls[1]).toStartWith("https://127.0.0.1:51001/");
+    if (result.snapshot?.kind === "window") {
+      expect(result.snapshot.fiveHour).toEqual({ usedPercent: 30, resetsAt: Date.parse(IN_3H) });
+    }
   });
 
   test("supports tokenless agy HTTP fallback and per-model GetCommandModelConfigs without guessing unknown cadence", async () => {
@@ -806,13 +920,123 @@ describe("Antigravity Tactic B (antigravity_api)", () => {
     expect(result.snapshot?.kind).toBe("window");
     if (result.snapshot?.kind === "window") {
       expect(result.snapshot.fiveHour).toBeNull();
-      expect(result.snapshot.weekly).toEqual({ usedPercent: 50, resetsAt: Date.parse(IN_5D) });
+      expect(result.snapshot.weekly).toBeNull();
       expect(result.snapshot.modelWindows).toEqual({
-        "Gemini 3 Pro": { usedPercent: 25, resetsAt: Date.parse(IN_3H) },
+        "Gemini 3 Pro": { usedPercent: 50, resetsAt: Date.parse(IN_5D) },
         "Gemini 4 Argon": { usedPercent: 80, resetsAt: Date.parse(IN_5D) },
       });
       expect(result.snapshot.extra?.planType).toBe("standard");
     }
+  });
+
+  test("continues to fallback endpoint when retrieveUserQuotaSummary returns malformed non-array buckets", async () => {
+    const urls: string[] = [];
+    const request = (async (input: Parameters<typeof globalThis.fetch>[0]) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.endsWith(":loadCodeAssist")) return Response.json({});
+      if (url.endsWith(":retrieveUserQuotaSummary")) {
+        return Response.json({ groups: [{ name: "Gemini", buckets: {} }] });
+      }
+      if (url.endsWith(":fetchAvailableModels")) {
+        return Response.json({
+          models: {
+            "gemini-4-neon": { displayName: "Gemini 4 Neon", quotaInfo: { remainingFraction: 0.75, resetTime: IN_3H } },
+          },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof globalThis.fetch;
+
+    const result = await collectAntigravity({
+      request,
+      runCommand: noLocalServer,
+      now: () => NOW,
+      env: {
+        ANTIGRAVITY_OAUTH_CREDENTIALS_JSON: JSON.stringify({ access_token: "tok", expiry_date: NOW + 3600_000 }),
+      },
+    });
+
+    expect(result.status).toBe("ok");
+    expect(result.source).toBe("antigravity_api");
+    expect(urls).toEqual([
+      "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+      "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+      "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+    ]);
+    if (result.snapshot?.kind === "window") {
+      expect(result.snapshot.modelWindows).toEqual({
+        "Gemini 4 Neon": { usedPercent: 25, resetsAt: Date.parse(IN_3H) },
+      });
+    }
+  });
+
+  test("honors OAuth credential priority order, explicit path errors, and skips expired/malformed home files", async () => {
+    const usedTokens: string[] = [];
+    const request = (async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
+      const url = String(input);
+      const auth = ((init?.headers ?? {}) as Record<string, string>).Authorization ?? "";
+      if (url.endsWith(":loadCodeAssist")) {
+        usedTokens.push(auth);
+        return Response.json({});
+      }
+      if (url.endsWith(":retrieveUserQuotaSummary")) {
+        return Response.json({
+          groups: [{ displayName: "Gemini", buckets: [{ displayName: "5h", remainingFraction: 0.9, resetTime: IN_3H }] }],
+        });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof globalThis.fetch;
+
+    // 1) ANTIGRAVITY_OAUTH_CREDENTIALS_JSON overrides QUOTA_ANTIGRAVITY_AUTH_PATH.
+    const fromEnv = await collectAntigravity({
+      request,
+      runCommand: noLocalServer,
+      now: () => NOW,
+      env: {
+        ANTIGRAVITY_OAUTH_CREDENTIALS_JSON: JSON.stringify({ access_token: "inline-tok", expiry_date: NOW + 3600_000 }),
+        QUOTA_ANTIGRAVITY_AUTH_PATH: "/explicit/oauth.json",
+      },
+      readFileText: async () => JSON.stringify({ access_token: "file-tok", expiry_date: NOW + 3600_000 }),
+    });
+    expect(fromEnv.status).toBe("ok");
+    expect(usedTokens.at(-1)).toBe("Bearer inline-tok");
+
+    // 2) Missing QUOTA_ANTIGRAVITY_AUTH_PATH fails cleanly without falling through to home files.
+    const missingExplicit = await collectAntigravity({
+      request,
+      runCommand: noLocalServer,
+      now: () => NOW,
+      env: { QUOTA_ANTIGRAVITY_AUTH_PATH: "/missing/oauth.json" },
+      homedir: () => "/fake-home",
+      readFileText: async (path) =>
+        path === "/fake-home/.gemini/oauth_creds.json"
+          ? JSON.stringify({ access_token: "home-tok", expiry_date: NOW + 3600_000 })
+          : null,
+    });
+    expect(missingExplicit.status).toBe("unavailable");
+    expect(missingExplicit.error).toContain("QUOTA_ANTIGRAVITY_AUTH_PATH");
+
+    // 3) Malformed first home file and expired second home file fall through to valid third home file.
+    const fallbackHome = await collectAntigravity({
+      request,
+      runCommand: noLocalServer,
+      now: () => NOW,
+      env: {},
+      homedir: () => "/fake-home",
+      readFileText: async (path) => {
+        if (path === "/fake-home/.gemini/antigravity-cli/antigravity-oauth-token") return "{not-json";
+        if (path === "/fake-home/.gemini/oauth_creds.json") {
+          return JSON.stringify({ access_token: "expired-home-tok", expiry_date: NOW - 10_000 });
+        }
+        if (path === "/fake-home/.codexbar/antigravity/oauth_creds.json") {
+          return JSON.stringify({ access_token: "valid-third-tok", expiry_date: NOW + 3600_000 });
+        }
+        return null;
+      },
+    });
+    expect(fallbackHome.status).toBe("ok");
+    expect(usedTokens.at(-1)).toBe("Bearer valid-third-tok");
   });
 
   test("bounds sequential Cloud Code OAuth calls within the shared API budget", async () => {

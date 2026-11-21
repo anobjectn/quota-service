@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { saveResetCredits, saveSnapshot, setManualEntry } from "../src/db";
+import { collectAntigravity, normalizeAvailableModels } from "../src/collectors/antigravity";
 import { recommendModel } from "../src/estimation";
 import { buildResetsReport, buildUsageReport, type ProviderReport, type UsageReport } from "../src/present";
 import type { CollectorResult, Provider } from "../src/types";
@@ -210,23 +211,104 @@ test("recommendation computes Antigravity headroom from modelWindows when fiveHo
   expect(mid.recommendation?.constraint).toBe("Gemini 4 Argon window");
 });
 
-test("usage serves last-known Antigravity snapshot as stale when newest attempt fails", () => {
-  const db = testDb();
+test("recommendation treats an exhausted Antigravity modelWindow as 0% headroom even with shared headroom", () => {
   const now = Date.now();
-  const goodAt = now - 5 * 60_000;
-  saveSnapshot(db, {
+  const report: ProviderReport = {
     provider: "antigravity",
     status: "ok",
     source: "antigravity_local",
-    dataAsOf: goodAt,
-    capturedAt: goodAt,
+    dataAgeMs: 0,
+    capturedAt: now,
     snapshot: {
       kind: "window",
-      fiveHour: { usedPercent: 15, resetsAt: now + 3_600_000 },
-      weekly: { usedPercent: 40, resetsAt: now + 5 * 86_400_000 },
-      extra: { planType: "pro" },
+      fiveHour: { usedPercent: 10, resetsAt: now + 3_600_000 },
+      weekly: null,
+      modelWindows: {
+        "Gemini 4 Argon": { usedPercent: 100, resetsAt: now + 3_600_000 },
+      },
     },
+    manualEntries: [],
+  };
+
+  const result = recommendModel("feature", { generatedAt: now, providers: [report] });
+  expect(result.recommendation?.model).not.toBe("Gemini 4 Argon");
+  expect(result.recommendation?.headroomPercent).toBe(90);
+  expect(result.warnings.some((w) => w.includes('falling back to adjacent tier'))).toBe(true);
+});
+
+test("recommendation never lends another Antigravity model's headroom to an exhausted candidate", () => {
+  const now = 1_800_000_000_000;
+  const snap = normalizeAvailableModels(
+    {
+      models: {
+        "gemini-4-argon": {
+          displayName: "Gemini 4 Argon",
+          quotaInfo: { remainingFraction: 0.9, resetTime: new Date(now + 5 * 86_400_000).toISOString() },
+        },
+        "gemini-4-neon": {
+          displayName: "Gemini 4 Neon",
+          quotaInfo: { remainingFraction: 0.0, resetTime: new Date(now + 3 * 3_600_000).toISOString() },
+        },
+      },
+    },
+    now,
+  );
+  expect(snap).not.toBeNull();
+  const result = recommendModel("large_refactor", {
+    generatedAt: now,
+    providers: [{
+      provider: "antigravity",
+      status: "ok",
+      source: "antigravity_api",
+      dataAgeMs: 0,
+      capturedAt: now,
+      snapshot: snap,
+      manualEntries: [],
+    }],
   });
+
+  expect(result.recommendation?.model).toBe("Gemini 4 Argon");
+  expect(result.recommendation?.headroomPercent).toBe(90);
+  expect(result.warnings.some((w) => w.includes('falling back to adjacent tier "mid"'))).toBe(true);
+});
+
+test("model-only Antigravity snapshot flows from collectAntigravity into usage, resets, and stale fallback", async () => {
+  const db = testDb();
+  const now = Date.now();
+  const goodAt = now - 5 * 60_000;
+  const resetAt = now + 3 * 3_600_000;
+  const collected = await collectAntigravity({
+    now: () => goodAt,
+    runCommand: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    env: { ANTIGRAVITY_OAUTH_CREDENTIALS_JSON: JSON.stringify({ access_token: "tok", expiry_date: now + 3_600_000 }) },
+    request: (async (input: Parameters<typeof globalThis.fetch>[0]) => {
+      const url = String(input);
+      if (url.endsWith(":loadCodeAssist")) return Response.json({ paidTier: { id: "g1-pro-tier", name: "Google AI Pro" } });
+      if (url.endsWith(":retrieveUserQuotaSummary")) return new Response("not found", { status: 404 });
+      if (url.endsWith(":fetchAvailableModels")) {
+        return Response.json({
+          models: {
+            "gemini-4-neon": { displayName: "Gemini 4 Neon", quotaInfo: { remainingFraction: 0.65, resetTime: new Date(resetAt).toISOString() } },
+          },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof globalThis.fetch,
+  });
+  expect(collected.status).toBe("ok");
+  saveSnapshot(db, collected);
+
+  const resets = buildResetsReport(db, ["antigravity"]);
+  expect(resets.windows).toEqual([
+    {
+      provider: "antigravity",
+      window: "model:Gemini 4 Neon",
+      usedPercent: 35,
+      resetsAt: resetAt,
+      capturedAt: goodAt,
+    },
+  ]);
+
   saveSnapshot(db, {
     provider: "antigravity",
     status: "stale",
@@ -242,7 +324,7 @@ test("usage serves last-known Antigravity snapshot as stale when newest attempt 
   expect(report.servingLastGood).toBe(true);
   expect(report.capturedAt).toBe(goodAt);
   expect(report.error).toContain("expired");
-  expect(report.snapshot?.kind === "window" && report.snapshot.fiveHour?.usedPercent).toBe(15);
+  expect(report.snapshot?.kind === "window" && report.snapshot.modelWindows?.["Gemini 4 Neon"]?.usedPercent).toBe(35);
   db.close();
 });
 

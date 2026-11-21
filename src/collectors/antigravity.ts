@@ -29,9 +29,12 @@ const CLOUD_FETCH_TIMEOUT_MS = 3_500;
  * inside collect.ts's 12s attempt ceiling. */
 const CLOUD_API_BUDGET_MS = 6_000;
 
-const WEEKLY_MIN_MS = 3 * 24 * 3600 * 1000;
+const FIVE_HOUR_MIN_SECONDS = 4 * 3600;
+const FIVE_HOUR_TARGET_SECONDS = 5 * 3600;
 const FIVE_HOUR_MAX_SECONDS = 6 * 3600;
-const WEEKLY_MIN_SECONDS = 3 * 24 * 3600;
+const WEEKLY_MIN_SECONDS = 6 * 24 * 3600;
+const WEEKLY_TARGET_SECONDS = 7 * 24 * 3600;
+const WEEKLY_MAX_SECONDS = 8 * 24 * 3600;
 
 const LOCAL_RPC_PREFIX = "/exa.language_server_pb.LanguageServerService";
 const LOCAL_RPC_METADATA = {
@@ -402,24 +405,26 @@ function extractFirstToken(command: string): string {
   return space === -1 ? trimmed : trimmed.slice(0, space);
 }
 
-/** Matches an executable basename in `ps` command output, handling quoted paths,
- * plain paths, and unquoted paths containing spaces (e.g. `/Applications/My Apps/.../agy`)
- * without false positives on flag or path arguments passed to unrelated binaries. */
-function matchesExecutableBasename(command: string, basenamePattern: RegExp): boolean {
+/** Matches an executable basename in `ps` command output and returns the matched
+ * executable path, handling quoted paths, plain paths, and unquoted paths containing
+ * spaces (e.g. `/Applications/My Apps/.../agy`) without matching arguments passed to
+ * unrelated binaries (e.g. `/opt/homebrew/bin/nvim notes/agy`). */
+function matchExecutableBasename(command: string, basenamePattern: RegExp): string | null {
   const trimmed = command.trim();
-  if (!trimmed) return false;
+  if (!trimmed) return null;
   const firstToken = extractFirstToken(trimmed);
   const firstBase = firstToken.split("/").pop() ?? "";
-  if (basenamePattern.test(firstBase)) return true;
+  if (basenamePattern.test(firstBase)) return firstToken;
 
   // Unquoted paths with spaces from `ps` start with `/`, `./`, or `../`.
-  // Standard system binary dirs (/bin, /sbin, /usr/bin, /usr/sbin) do not host
-  // spaced subdirectories, which avoids matching e.g. `/usr/bin/vim notes/agy`.
+  // If `firstToken` already sits in a `bin`/`sbin` directory (e.g. `/usr/bin/vim`,
+  // `/opt/homebrew/bin/nvim`, `~/.bun/bin/bun`), anything after whitespace is an
+  // argument, never a spaced continuation of the executable path.
   if (
     (!trimmed.startsWith("/") && !trimmed.startsWith("./") && !trimmed.startsWith("../")) ||
-    /^\/(?:usr\/)?s?bin\//i.test(trimmed)
+    /(?:^|\/)s?bin\/[^/\s]+$/i.test(firstToken)
   ) {
-    return false;
+    return null;
   }
 
   const slashSegment = /\/([^/\s]+)(?=\s|$)/g;
@@ -430,11 +435,17 @@ function matchesExecutableBasename(command: string, basenamePattern: RegExp): bo
     const prefix = trimmed.slice(0, match.index);
     // Reject if an earlier token already started arguments (flags, another path, or shell operators).
     if (/\s+(?:-|\/|~\/|\.\.?\/|&&|\|\||[|;<>])/.test(prefix)) {
-      return false;
+      return null;
     }
-    return true;
+    const candidatePath = `${prefix}/${candidate}`;
+    // Only treat an unquoted spaced string as an executable path when it lives in
+    // an Applications/app-bundle/Antigravity path rather than an arbitrary tool + file arg.
+    if (!/(?:^\/Applications\/|\/Applications\/|\.app\/|antigravity)/i.test(candidatePath)) {
+      return null;
+    }
+    return candidatePath;
   }
-  return false;
+  return null;
 }
 
 /** Parses `ps -ax -o pid=,command=` output and returns candidate Antigravity processes. */
@@ -449,12 +460,17 @@ export function parseAntigravityProcesses(psOutput: string): AntigravityProcessI
     const command = match[2]!.trim();
     if (!Number.isSafeInteger(pid) || pid <= 0 || seenPids.has(pid)) continue;
 
-    const isLanguageServer =
-      matchesExecutableBasename(command, /^language_server(?:_[a-z0-9_]+)?$/i) &&
-      /antigravity/i.test(command);
-    const isAgy = matchesExecutableBasename(command, /^agy$/i);
+    const languageServerPath = matchExecutableBasename(command, /^language_server(?:_[a-z0-9_]+)?$/i);
+    const appDataDir = extractFlagValue(command, "app_data_dir");
+    const ideName = extractFlagValue(command, "ide_name");
+    const isAntigravityServer =
+      languageServerPath !== null &&
+      (/antigravity/i.test(languageServerPath) ||
+        /antigravity/i.test(appDataDir ?? "") ||
+        /antigravity/i.test(ideName ?? ""));
+    const isAgy = matchExecutableBasename(command, /^agy$/i) !== null;
 
-    if (!isLanguageServer && !isAgy) continue;
+    if (!isAntigravityServer && !isAgy) continue;
     seenPids.add(pid);
 
     const csrfToken = extractFlagValue(command, "csrf_token");
@@ -466,7 +482,7 @@ export function parseAntigravityProcesses(psOutput: string): AntigravityProcessI
 
     found.push({
       pid,
-      kind: isLanguageServer ? "language_server" : "agy",
+      kind: isAntigravityServer ? "language_server" : "agy",
       command,
       csrfToken,
       extensionServerPort,
@@ -509,21 +525,6 @@ export function parseListeningEndpoints(lsofOutput: string): ListeningEndpoint[]
   return endpoints;
 }
 
-/** Parses `lsof -nP -iTCP -sTCP:LISTEN -a -p <pid>` output for loopback/wildcard TCP listening ports. */
-export function parseListeningPorts(lsofOutput: string): number[] {
-  return parseListeningEndpoints(lsofOutput).map((endpoint) => endpoint.port);
-}
-
-/** Classifies cadence from remaining reset horizon only when unambiguous.
- * Never guesses `fiveHour` from remaining time alone (a weekly bucket with <= 6h
- * left before reset would be misclassified); only `>= 3 days` safely maps to `weekly`. */
-function classifyCadenceFromHorizon(resetsAt: number | null, now: number): Cadence {
-  if (resetsAt === null) return "unknown";
-  const horizonMs = resetsAt - now;
-  if (horizonMs >= WEEKLY_MIN_MS) return "weekly";
-  return "unknown";
-}
-
 function parseDurationSeconds(value: unknown): number | null {
   if (typeof value === "number") {
     return Number.isFinite(value) && value > 0 ? value : null;
@@ -538,43 +539,74 @@ function parseDurationSeconds(value: unknown): number | null {
   return null;
 }
 
-function classifyBucketCadence(bucket: QuotaSummaryBucketPayload, resetsAt: number | null, now: number): Cadence {
-  const textParts: string[] = [];
+function formatDurationLabel(seconds: number): string {
+  if (seconds % 86_400 === 0) return `${seconds / 86_400}d`;
+  if (seconds % 3_600 === 0) return `${seconds / 3_600}h`;
+  if (seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
+}
+
+function matchCadenceText(parts: string[]): Cadence {
+  if (parts.length === 0) return "unknown";
+  // Normalize underscores/hyphens to spaces so identifiers like `gemini_5h` or
+  // `QUOTA_WINDOW_WEEKLY` match `\b` word boundaries cleanly.
+  const combined = parts.join(" ").replace(/[_-]+/g, " ");
+  const matchesFiveHour = /\b(?:5\s*h(?:our|r)?s?|five\s+hour|session|short\s+term|rolling\s+5)\b/i.test(combined);
+  const matchesWeekly = /\b(?:7\s*d(?:ay)?s?|week(?:ly)?|seven\s+day)\b/i.test(combined);
+  if (matchesFiveHour && !matchesWeekly) return "fiveHour";
+  if (matchesWeekly && !matchesFiveHour) return "weekly";
+  return "unknown";
+}
+
+function classifyBucketCadence(
+  bucket: QuotaSummaryBucketPayload,
+): { cadence: Cadence; durationSeconds: number | null } {
+  const structuredParts: string[] = [];
+  let explicitDuration: number | null = null;
+
   if (typeof bucket.window === "string") {
-    const dur = parseDurationSeconds(bucket.window);
-    if (dur !== null) {
-      if (dur <= FIVE_HOUR_MAX_SECONDS) return "fiveHour";
-      if (dur >= WEEKLY_MIN_SECONDS) return "weekly";
+    explicitDuration = parseDurationSeconds(bucket.window);
+    if (explicitDuration === null) {
+      structuredParts.push(bucket.window);
     }
-    textParts.push(bucket.window);
   } else if (bucket.window && typeof bucket.window === "object") {
-    const dur =
+    explicitDuration =
       parseDurationSeconds(bucket.window.durationSeconds) ??
       parseDurationSeconds(bucket.window.seconds) ??
       parseDurationSeconds(bucket.window.duration);
-    if (dur !== null) {
-      if (dur <= FIVE_HOUR_MAX_SECONDS) return "fiveHour";
-      if (dur >= WEEKLY_MIN_SECONDS) return "weekly";
-    }
     for (const field of [bucket.window.displayName, bucket.window.name, bucket.window.type]) {
       const s = nonEmptyString(field);
-      if (s) textParts.push(s);
+      if (s) structuredParts.push(s);
     }
   }
-  for (const field of [bucket.bucketId, bucket.id, bucket.displayName, bucket.name, bucket.description]) {
+
+  // When an explicit duration is reported, match strictly to supported 5h (4h-6h)
+  // or weekly (6d-8d) bands so short (e.g. 60s, 3600s) or monthly (20d) buckets
+  // stay honestly in `modelWindows` rather than taking the 5h/weekly slot.
+  if (explicitDuration !== null) {
+    if (explicitDuration >= FIVE_HOUR_MIN_SECONDS && explicitDuration <= FIVE_HOUR_MAX_SECONDS) {
+      return { cadence: "fiveHour", durationSeconds: explicitDuration };
+    }
+    if (explicitDuration >= WEEKLY_MIN_SECONDS && explicitDuration <= WEEKLY_MAX_SECONDS) {
+      return { cadence: "weekly", durationSeconds: explicitDuration };
+    }
+    return { cadence: "unknown", durationSeconds: explicitDuration };
+  }
+
+  for (const field of [bucket.bucketId, bucket.id, bucket.displayName, bucket.name]) {
     const s = nonEmptyString(field);
-    if (s) textParts.push(s);
+    if (s) structuredParts.push(s);
   }
-  // Normalize underscores/hyphens to spaces so identifiers like `gemini_5h` or
-  // `QUOTA_WINDOW_WEEKLY` match `\b` word boundaries cleanly.
-  const combined = textParts.join(" ").replace(/[_-]+/g, " ");
-  if (/\b(?:5\s*h(?:our|r)?s?|five\s+hour|session|short\s+term|rolling\s+5)\b/i.test(combined)) {
-    return "fiveHour";
+  const fromStructured = matchCadenceText(structuredParts);
+  if (fromStructured !== "unknown") {
+    return { cadence: fromStructured, durationSeconds: null };
   }
-  if (/\b(?:7\s*d(?:ay)?s?|week(?:ly)?|seven\s+day)\b/i.test(combined)) {
-    return "weekly";
+
+  const description = nonEmptyString(bucket.description);
+  if (description) {
+    return { cadence: matchCadenceText([description]), durationSeconds: null };
   }
-  return classifyCadenceFromHorizon(resetsAt, now);
+  return { cadence: "unknown", durationSeconds: null };
 }
 
 function extractBucketRemainingFraction(bucket: QuotaSummaryBucketPayload): number | null {
@@ -685,17 +717,20 @@ function buildExtra(
 /** Normalizes a structured `RetrieveUserQuotaSummary` payload into a `WindowSnapshot`. */
 export function normalizeQuotaSummary(
   rawPayload: QuotaSummaryPayload,
-  now: number,
+  _now: number,
   plan?: PlanMetadata | null,
   endpoint = "RetrieveUserQuotaSummary",
 ): WindowSnapshot | null {
+  if (!rawPayload || typeof rawPayload !== "object" || Array.isArray(rawPayload)) return null;
   const payload = rawPayload.response ?? rawPayload.summary ?? rawPayload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const rawGroups = Array.isArray(payload.groups) ? payload.groups : [];
   if (rawGroups.length === 0) return null;
 
   interface ParsedBucket {
     quota: WindowQuota;
     cadence: Cadence;
+    durationSeconds: number | null;
     label: string | null;
     id: string | null;
   }
@@ -708,21 +743,23 @@ export function normalizeQuotaSummary(
 
   const parsedGroups: ParsedGroup[] = [];
   for (const group of rawGroups) {
-    if (!group || typeof group !== "object") continue;
+    if (!group || typeof group !== "object" || Array.isArray(group)) continue;
+    const rawBuckets = Array.isArray(group.buckets) ? group.buckets : [];
     const groupLabel = nonEmptyString(group.displayName) ?? nonEmptyString(group.name) ?? "";
     const parsedBuckets: ParsedBucket[] = [];
-    for (const bucket of group.buckets ?? []) {
-      if (!bucket || typeof bucket !== "object") continue;
+    for (const bucket of rawBuckets) {
+      if (!bucket || typeof bucket !== "object" || Array.isArray(bucket)) continue;
       if (bucket.disabled === true) continue;
       const usedPercent = remainingFractionToUsedPercent(extractBucketRemainingFraction(bucket));
       if (usedPercent === null) continue;
       const resetsAt = parseTimestamp(bucket.resetTime);
-      const cadence = classifyBucketCadence(bucket, resetsAt, now);
+      const { cadence, durationSeconds } = classifyBucketCadence(bucket);
       const label = nonEmptyString(bucket.displayName) ?? nonEmptyString(bucket.name);
       const id = nonEmptyString(bucket.bucketId) ?? nonEmptyString(bucket.id);
       parsedBuckets.push({
         quota: { usedPercent, resetsAt },
         cadence,
+        durationSeconds,
         label,
         id,
       });
@@ -754,31 +791,68 @@ export function normalizeQuotaSummary(
   let weekly: WindowQuota | null = null;
   const modelWindows: Record<string, WindowQuota> = {};
 
+  const pickBestBucketIndex = (
+    buckets: ParsedBucket[],
+    cadence: "fiveHour" | "weekly",
+    targetSeconds: number,
+  ): number => {
+    let bestIdx = -1;
+    let bestDiff = Number.POSITIVE_INFINITY;
+    for (let j = 0; j < buckets.length; j++) {
+      const bucket = buckets[j]!;
+      if (bucket.cadence !== cadence) continue;
+      const diff = bucket.durationSeconds !== null
+        ? Math.abs(bucket.durationSeconds - targetSeconds)
+        : Number.POSITIVE_INFINITY;
+      if (bestIdx === -1 || diff < bestDiff) {
+        bestIdx = j;
+        bestDiff = diff;
+      }
+    }
+    return bestIdx;
+  };
+
+  const fallbackBucketLabel = (
+    bucket: ParsedBucket,
+    groupBucketCount: number,
+    isPrimaryGroup: boolean,
+  ): string | null => {
+    if (bucket.label) return bucket.label;
+    if (bucket.cadence === "unknown") {
+      if (isPrimaryGroup || groupBucketCount > 1) {
+        return bucket.id ?? (bucket.durationSeconds !== null ? formatDurationLabel(bucket.durationSeconds) : null);
+      }
+      return bucket.durationSeconds !== null ? formatDurationLabel(bucket.durationSeconds) : null;
+    }
+    return null;
+  };
+
   for (let i = 0; i < parsedGroups.length; i++) {
     const group = parsedGroups[i]!;
     const displayGroupLabel = group.label || "Antigravity";
     if (i === primaryIndex) {
-      for (const bucket of group.buckets) {
-        if (bucket.cadence === "fiveHour" && fiveHour === null) {
-          fiveHour = bucket.quota;
-        } else if (bucket.cadence === "weekly" && weekly === null) {
-          weekly = bucket.quota;
-        } else {
-          const key = formatModelWindowKey(
-            displayGroupLabel,
-            bucket.label ?? (bucket.cadence === "unknown" ? bucket.id : null),
-            bucket.cadence,
-            group.buckets.length,
-          );
-          insertModelWindow(modelWindows, key, bucket.quota);
-        }
+      const bestFiveHourIdx = pickBestBucketIndex(group.buckets, "fiveHour", FIVE_HOUR_TARGET_SECONDS);
+      const bestWeeklyIdx = pickBestBucketIndex(group.buckets, "weekly", WEEKLY_TARGET_SECONDS);
+      if (bestFiveHourIdx >= 0) fiveHour = group.buckets[bestFiveHourIdx]!.quota;
+      if (bestWeeklyIdx >= 0) weekly = group.buckets[bestWeeklyIdx]!.quota;
+
+      for (let j = 0; j < group.buckets.length; j++) {
+        if (j === bestFiveHourIdx || j === bestWeeklyIdx) continue;
+        const bucket = group.buckets[j]!;
+        const key = formatModelWindowKey(
+          displayGroupLabel,
+          fallbackBucketLabel(bucket, group.buckets.length, true),
+          bucket.cadence,
+          group.buckets.length,
+        );
+        insertModelWindow(modelWindows, key, bucket.quota);
       }
       continue;
     }
     for (const bucket of group.buckets) {
       const key = formatModelWindowKey(
         displayGroupLabel,
-        bucket.label ?? (bucket.cadence === "unknown" && group.buckets.length > 1 ? bucket.id : null),
+        fallbackBucketLabel(bucket, group.buckets.length, false),
         bucket.cadence,
         group.buckets.length,
       );
@@ -799,8 +873,6 @@ export function normalizeQuotaSummary(
 interface NormalizedModelEntry {
   modelId: string;
   label: string;
-  isGemini: boolean;
-  cadence: Cadence;
   quota: WindowQuota;
 }
 
@@ -821,21 +893,11 @@ function prettifyModelId(modelId: string): string {
     .join(" ");
 }
 
-function isGeminiModel(label: string, modelId: string): boolean {
-  if (/\b(?:claude|anthropic|gpt|openai|oss)\b/i.test(label)) return false;
-  return /gemini/i.test(label) || /gemini/i.test(modelId);
-}
-
-function geminiRepresentativePriority(entry: NormalizedModelEntry): number {
-  const text = `${entry.label} ${entry.modelId}`.toLowerCase();
-  // Prefer general Gemini Pro / primary Gemini over Flash or specialized variants,
-  // then tighter utilization as a conservative tie-breaker.
-  let score = 0;
-  if (/\bpro\b/.test(text)) score += 20;
-  else if (!/\bflash\b|\blite\b/.test(text)) score += 10;
-  return score * 1000 + entry.quota.usedPercent;
-}
-
+/** Per-model fallback endpoints (`GetUserStatus`, `GetCommandModelConfigs`,
+ * `fetchAvailableModels`, `retrieveUserQuota`) carry no window-duration metadata
+ * and no shared-pool distinction. Keep every model bucket stably in `modelWindows`
+ * so buckets never jump between `weekly` and `modelWindows` mid-cycle and one
+ * model's headroom is never mistaken for another model's account-wide quota. */
 function normalizeModelEntries(
   entries: NormalizedModelEntry[],
   plan: PlanMetadata | null | undefined,
@@ -843,46 +905,15 @@ function normalizeModelEntries(
 ): WindowSnapshot | null {
   if (entries.length === 0) return null;
 
-  let weeklyIdx = -1;
-  let weeklyPriority = -1;
-
-  // Horizon-only endpoints carry no explicit window duration, so we never guess
-  // `fiveHour` here; only a Gemini bucket resetting >= 3 days out safely maps to `weekly`.
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i]!;
-    if (!entry.isGemini || entry.cadence !== "weekly") continue;
-    const priority = geminiRepresentativePriority(entry);
-    if (priority > weeklyPriority) {
-      weeklyPriority = priority;
-      weeklyIdx = i;
-    }
-  }
-
-  const weekly = weeklyIdx >= 0 ? entries[weeklyIdx]!.quota : null;
-
-  // Check if any label appears with multiple distinct cadences among remaining entries.
-  const remaining = entries.filter((_, idx) => idx !== weeklyIdx);
-  const labelCadences = new Map<string, Set<Cadence>>();
-  for (const entry of remaining) {
-    const set = labelCadences.get(entry.label) ?? new Set<Cadence>();
-    set.add(entry.cadence);
-    labelCadences.set(entry.label, set);
-  }
-
   const modelWindows: Record<string, WindowQuota> = {};
-  for (const entry of remaining) {
-    const hasMultiCadence = (labelCadences.get(entry.label)?.size ?? 0) > 1;
-    const key =
-      hasMultiCadence && entry.cadence === "weekly"
-        ? `${entry.label} (weekly)`
-        : entry.label;
-    insertModelWindow(modelWindows, key, entry.quota);
+  for (const entry of entries) {
+    insertModelWindow(modelWindows, entry.label, entry.quota);
   }
 
   const snapshot: WindowSnapshot = {
     kind: "window",
     fiveHour: null,
-    weekly,
+    weekly: null,
     modelWindows,
     extra: buildExtra(plan, endpoint),
   };
@@ -892,13 +923,14 @@ function normalizeModelEntries(
 /** Normalizes `GetUserStatus` / `GetCommandModelConfigs` `clientModelConfigs[]` into a `WindowSnapshot`. */
 export function normalizeModelConfigs(
   configs: ClientModelConfigPayload[] | null | undefined,
-  now: number,
+  _now: number,
   plan?: PlanMetadata | null,
   endpoint = "GetUserStatus",
 ): WindowSnapshot | null {
+  if (!Array.isArray(configs)) return null;
   const entries: NormalizedModelEntry[] = [];
-  for (const cfg of configs ?? []) {
-    if (!cfg || typeof cfg !== "object" || cfg.disabled === true) continue;
+  for (const cfg of configs) {
+    if (!cfg || typeof cfg !== "object" || Array.isArray(cfg) || cfg.disabled === true) continue;
     const usedPercent = remainingFractionToUsedPercent(cfg.quotaInfo?.remainingFraction);
     if (usedPercent === null) continue;
     const resetsAt = parseTimestamp(cfg.quotaInfo?.resetTime);
@@ -907,8 +939,6 @@ export function normalizeModelConfigs(
     entries.push({
       modelId,
       label,
-      isGemini: isGeminiModel(label, modelId),
-      cadence: classifyCadenceFromHorizon(resetsAt, now),
       quota: { usedPercent, resetsAt },
     });
   }
@@ -918,14 +948,14 @@ export function normalizeModelConfigs(
 /** Normalizes Cloud Code `fetchAvailableModels` response into a `WindowSnapshot`. */
 export function normalizeAvailableModels(
   body: FetchAvailableModelsResponse | null | undefined,
-  now: number,
+  _now: number,
   plan?: PlanMetadata | null,
 ): WindowSnapshot | null {
   const models = body?.models;
-  if (!models || typeof models !== "object") return null;
+  if (!models || typeof models !== "object" || Array.isArray(models)) return null;
   const entries: NormalizedModelEntry[] = [];
   for (const [modelId, info] of Object.entries(models)) {
-    if (!info || typeof info !== "object" || info.disabled === true) continue;
+    if (!info || typeof info !== "object" || Array.isArray(info) || info.disabled === true) continue;
     const usedPercent = remainingFractionToUsedPercent(info.quotaInfo?.remainingFraction);
     if (usedPercent === null) continue;
     const resetsAt = parseTimestamp(info.quotaInfo?.resetTime);
@@ -933,8 +963,6 @@ export function normalizeAvailableModels(
     entries.push({
       modelId,
       label,
-      isGemini: isGeminiModel(label, modelId),
-      cadence: classifyCadenceFromHorizon(resetsAt, now),
       quota: { usedPercent, resetsAt },
     });
   }
@@ -944,12 +972,13 @@ export function normalizeAvailableModels(
 /** Normalizes Cloud Code `retrieveUserQuota` buckets into a `WindowSnapshot`. */
 export function normalizeCloudQuotaBuckets(
   body: RetrieveUserQuotaResponse | null | undefined,
-  now: number,
+  _now: number,
   plan?: PlanMetadata | null,
 ): WindowSnapshot | null {
+  if (!Array.isArray(body?.buckets)) return null;
   const entries: NormalizedModelEntry[] = [];
-  for (const bucket of body?.buckets ?? []) {
-    if (!bucket || typeof bucket !== "object" || bucket.disabled === true) continue;
+  for (const bucket of body.buckets) {
+    if (!bucket || typeof bucket !== "object" || Array.isArray(bucket) || bucket.disabled === true) continue;
     const usedPercent = remainingFractionToUsedPercent(bucket.remainingFraction);
     if (usedPercent === null) continue;
     const resetsAt = parseTimestamp(bucket.resetTime);
@@ -958,8 +987,6 @@ export function normalizeCloudQuotaBuckets(
     entries.push({
       modelId,
       label,
-      isGemini: isGeminiModel(label, modelId),
-      cadence: classifyCadenceFromHorizon(resetsAt, now),
       quota: { usedPercent, resetsAt },
     });
   }
@@ -1157,6 +1184,7 @@ async function postLoopbackRpc(
     method: "POST",
     headers,
     body: JSON.stringify(LOCAL_RPC_METADATA),
+    redirect: "error",
     signal: AbortSignal.timeout(timeoutMs),
   };
   // Scope self-signed TLS acceptance strictly to loopback HTTPS (127.0.0.1 / [::1]).
@@ -1168,7 +1196,10 @@ async function postLoopbackRpc(
   try {
     const res = await request(url, init);
     if (!res.ok) {
-      return { ok: false, transportError: false, error: `${method} HTTP ${res.status}` };
+      // Go's net/http TLS server replies HTTP 400 ("Client sent an HTTP request to an HTTPS server")
+      // when probed with plain HTTP; allow scheme fallback from HTTP to HTTPS on 400.
+      const schemeMismatch = scheme === "http" && res.status === 400;
+      return { ok: false, transportError: schemeMismatch, error: `${method} HTTP ${res.status}` };
     }
     const json = (await res.json()) as unknown;
     if (!json || typeof json !== "object" || Array.isArray(json)) {
@@ -1200,13 +1231,13 @@ async function queryLocalTarget(
 
   if (summaryRes.ok) {
     const payload = summaryRes.body as QuotaSummaryPayload;
-    if (!isRpcErrorCode(payload.code) || Array.isArray(payload.groups) || payload.response || payload.summary) {
+    if (!isRpcErrorCode(payload.code)) {
       let plan: PlanMetadata | null = null;
       const baseSnapshot = normalizeQuotaSummary(payload, capturedAt, null, "RetrieveUserQuotaSummary");
       if (baseSnapshot) {
         // Enrich plan/tier from GetUserStatus on the same working loopback target (best-effort).
         const statusRes = await postLoopbackRpc(request, scheme, host, port, "GetUserStatus", csrfToken, deadline);
-        if (statusRes.ok) {
+        if (statusRes.ok && !isRpcErrorCode((statusRes.body as GetUserStatusResponse).code)) {
           plan = extractPlanFromUserStatus(statusRes.body as GetUserStatusResponse);
         }
         return {
@@ -1228,15 +1259,17 @@ async function queryLocalTarget(
   const statusRes = await postLoopbackRpc(request, scheme, host, port, "GetUserStatus", csrfToken, deadline);
   if (statusRes.ok) {
     const statusBody = statusRes.body as GetUserStatusResponse;
-    planFromStatus = extractPlanFromUserStatus(statusBody);
-    const configs = statusBody.userStatus?.cascadeModelConfigData?.clientModelConfigs;
-    const snapshot = normalizeModelConfigs(configs, capturedAt, planFromStatus, "GetUserStatus");
-    if (snapshot) {
-      return {
-        snapshot: { ...snapshot, extra: { ...snapshot.extra, loopbackHost: host } },
-        transportError: false,
-        error: null,
-      };
+    if (!isRpcErrorCode(statusBody.code)) {
+      planFromStatus = extractPlanFromUserStatus(statusBody);
+      const configs = statusBody.userStatus?.cascadeModelConfigData?.clientModelConfigs;
+      const snapshot = normalizeModelConfigs(configs, capturedAt, planFromStatus, "GetUserStatus");
+      if (snapshot) {
+        return {
+          snapshot: { ...snapshot, extra: { ...snapshot.extra, loopbackHost: host } },
+          transportError: false,
+          error: null,
+        };
+      }
     }
     lastError = nonEmptyString(statusBody.message) ?? "GetUserStatus returned no usable model quotas";
   } else {
@@ -1247,18 +1280,20 @@ async function queryLocalTarget(
   const cmdRes = await postLoopbackRpc(request, scheme, host, port, "GetCommandModelConfigs", csrfToken, deadline);
   if (cmdRes.ok) {
     const cmdBody = cmdRes.body as GetCommandModelConfigsResponse;
-    const snapshot = normalizeModelConfigs(
-      cmdBody.clientModelConfigs,
-      capturedAt,
-      planFromStatus,
-      "GetCommandModelConfigs",
-    );
-    if (snapshot) {
-      return {
-        snapshot: { ...snapshot, extra: { ...snapshot.extra, loopbackHost: host } },
-        transportError: false,
-        error: null,
-      };
+    if (!isRpcErrorCode(cmdBody.code)) {
+      const snapshot = normalizeModelConfigs(
+        cmdBody.clientModelConfigs,
+        capturedAt,
+        planFromStatus,
+        "GetCommandModelConfigs",
+      );
+      if (snapshot) {
+        return {
+          snapshot: { ...snapshot, extra: { ...snapshot.extra, loopbackHost: host } },
+          transportError: false,
+          error: null,
+        };
+      }
     }
     lastError = nonEmptyString(cmdBody.message) ?? "GetCommandModelConfigs returned no usable model quotas";
   } else {
@@ -1414,6 +1449,7 @@ async function postCloudCode(
       method: "POST",
       headers: cloudCodeHeaders(accessToken, arch),
       body: JSON.stringify(body),
+      redirect: "error",
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (res.status === 401) {
@@ -1508,122 +1544,70 @@ async function collectFromCloudApi(
     lastError = loadRes.message;
   }
 
-  if (Date.now() >= deadline) {
-    return unavailableCloudResult(capturedAt, budgetError);
-  }
-
   const projectPayload = project ? { project } : {};
 
-  // Primary Cloud Code quota summary endpoint.
-  const summaryRes = await postCloudCode(
-    request,
-    `${DAILY_CLOUD_CODE_BASE}/v1internal:retrieveUserQuotaSummary`,
-    credential.accessToken,
-    arch,
-    projectPayload,
-    deadline,
-    perCallCapMs,
-  );
-  if (summaryRes.kind === "unauthorized") {
-    return staleOauthResult(
-      capturedAt,
-      "401 from Cloud Code retrieveUserQuotaSummary — access token stale; will self-heal on next Antigravity sign-in or use (no self-refresh by design)",
-    );
-  }
-  if (summaryRes.kind === "ok") {
-    const snapshot = normalizeQuotaSummary(
-      summaryRes.data as QuotaSummaryPayload,
-      capturedAt,
-      plan,
-      "retrieveUserQuotaSummary",
-    );
-    if (snapshot) {
-      return {
-        provider: "antigravity",
-        status: "ok",
-        source: "antigravity_api",
-        dataAsOf: capturedAt,
-        capturedAt,
-        snapshot,
-      };
+  const endpoints: Array<{
+    name: string;
+    url: string;
+    emptyError: string;
+    normalize: (data: Record<string, unknown>) => WindowSnapshot | null;
+  }> = [
+    {
+      name: "retrieveUserQuotaSummary",
+      url: `${DAILY_CLOUD_CODE_BASE}/v1internal:retrieveUserQuotaSummary`,
+      emptyError: "retrieveUserQuotaSummary returned no usable quota groups",
+      normalize: (data) =>
+        normalizeQuotaSummary(data as QuotaSummaryPayload, capturedAt, plan, "retrieveUserQuotaSummary"),
+    },
+    {
+      name: "fetchAvailableModels",
+      url: `${CLOUD_CODE_BASE}/v1internal:fetchAvailableModels`,
+      emptyError: "fetchAvailableModels returned no usable model quotas",
+      normalize: (data) => normalizeAvailableModels(data as FetchAvailableModelsResponse, capturedAt, plan),
+    },
+    {
+      name: "retrieveUserQuota",
+      url: `${CLOUD_CODE_BASE}/v1internal:retrieveUserQuota`,
+      emptyError: "retrieveUserQuota returned no usable quota buckets",
+      normalize: (data) => normalizeCloudQuotaBuckets(data as RetrieveUserQuotaResponse, capturedAt, plan),
+    },
+  ];
+
+  for (const step of endpoints) {
+    if (Date.now() >= deadline) {
+      return unavailableCloudResult(capturedAt, budgetError);
     }
-    lastError = "retrieveUserQuotaSummary returned no usable quota groups";
-  } else {
-    lastError = summaryRes.message;
-  }
-
-  if (Date.now() >= deadline) {
-    return unavailableCloudResult(capturedAt, budgetError);
-  }
-
-  // Fallback 1: fetchAvailableModels.
-  const modelsRes = await postCloudCode(
-    request,
-    `${CLOUD_CODE_BASE}/v1internal:fetchAvailableModels`,
-    credential.accessToken,
-    arch,
-    projectPayload,
-    deadline,
-    perCallCapMs,
-  );
-  if (modelsRes.kind === "unauthorized") {
-    return staleOauthResult(
-      capturedAt,
-      "401 from Cloud Code fetchAvailableModels — access token stale; will self-heal on next Antigravity sign-in or use (no self-refresh by design)",
+    const res = await postCloudCode(
+      request,
+      step.url,
+      credential.accessToken,
+      arch,
+      projectPayload,
+      deadline,
+      perCallCapMs,
     );
-  }
-  if (modelsRes.kind === "ok") {
-    const snapshot = normalizeAvailableModels(modelsRes.data as FetchAvailableModelsResponse, capturedAt, plan);
-    if (snapshot) {
-      return {
-        provider: "antigravity",
-        status: "ok",
-        source: "antigravity_api",
-        dataAsOf: capturedAt,
+    if (res.kind === "unauthorized") {
+      return staleOauthResult(
         capturedAt,
-        snapshot,
-      };
+        `401 from Cloud Code ${step.name} — access token stale; will self-heal on next Antigravity sign-in or use (no self-refresh by design)`,
+      );
     }
-    lastError = "fetchAvailableModels returned no usable model quotas";
-  } else {
-    lastError = modelsRes.message;
-  }
-
-  if (Date.now() >= deadline) {
-    return unavailableCloudResult(capturedAt, budgetError);
-  }
-
-  // Fallback 2: retrieveUserQuota.
-  const quotaRes = await postCloudCode(
-    request,
-    `${CLOUD_CODE_BASE}/v1internal:retrieveUserQuota`,
-    credential.accessToken,
-    arch,
-    projectPayload,
-    deadline,
-    perCallCapMs,
-  );
-  if (quotaRes.kind === "unauthorized") {
-    return staleOauthResult(
-      capturedAt,
-      "401 from Cloud Code retrieveUserQuota — access token stale; will self-heal on next Antigravity sign-in or use (no self-refresh by design)",
-    );
-  }
-  if (quotaRes.kind === "ok") {
-    const snapshot = normalizeCloudQuotaBuckets(quotaRes.data as RetrieveUserQuotaResponse, capturedAt, plan);
-    if (snapshot) {
-      return {
-        provider: "antigravity",
-        status: "ok",
-        source: "antigravity_api",
-        dataAsOf: capturedAt,
-        capturedAt,
-        snapshot,
-      };
+    if (res.kind === "ok") {
+      const snapshot = step.normalize(res.data);
+      if (snapshot) {
+        return {
+          provider: "antigravity",
+          status: "ok",
+          source: "antigravity_api",
+          dataAsOf: capturedAt,
+          capturedAt,
+          snapshot,
+        };
+      }
+      lastError = step.emptyError;
+    } else {
+      lastError = res.message;
     }
-    lastError = "retrieveUserQuota returned no usable quota buckets";
-  } else {
-    lastError = quotaRes.message;
   }
 
   return unavailableCloudResult(capturedAt, lastError ?? "Cloud Code API returned no usable quota data");

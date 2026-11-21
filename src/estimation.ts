@@ -199,6 +199,74 @@ function computeAnthropicFrontierHeadroom(report: ProviderReport): ProviderHeadr
   return { ...base, headroomPercent: minHeadroom, constraint };
 }
 
+function normalizeModelMatchKey(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/[-_\s]+/g, " ")
+    .trim();
+}
+
+/** For Antigravity candidates, the binding constraint is the MINIMUM headroom
+ * across any shared limits (`fiveHour`, `weekly`) AND any `modelWindows` entry
+ * targeting that specific candidate model (e.g. `Gemini 4 Argon` or
+ * `Gemini 4 Argon (5h)`). If neither shared windows nor a model-specific match
+ * exist, fall back to Gemini `modelWindows` (or all `modelWindows`) so
+ * per-model-only snapshots remain rankable without overstating an exhausted model. */
+function computeAntigravityCandidateHeadroom(
+  report: ProviderReport,
+  modelName: string,
+): ProviderHeadroom {
+  const base = computeHeadroom(report);
+  if (report.status === "unavailable" || !report.snapshot || report.snapshot.kind !== "window") {
+    return base;
+  }
+  const modelWindows = report.snapshot.modelWindows;
+  const validEntries = modelWindows
+    ? Object.entries(modelWindows).filter(([, w]) => w != null && Number.isFinite(w.usedPercent))
+    : [];
+
+  let minHeadroom: number | null = null;
+  let constraint: string | null = null;
+  for (const [label, w] of [
+    ["5h", report.snapshot.fiveHour],
+    ["weekly", report.snapshot.weekly],
+  ] as const) {
+    if (!w || !Number.isFinite(w.usedPercent)) continue;
+    const headroom = 100 - w.usedPercent;
+    if (minHeadroom === null || headroom < minHeadroom) {
+      minHeadroom = headroom;
+      constraint = `${label} window`;
+    }
+  }
+
+  const targetKey = normalizeModelMatchKey(modelName);
+  const matchingEntries = validEntries.filter(([name]) => {
+    const key = normalizeModelMatchKey(name);
+    return key === targetKey || key.startsWith(`${targetKey} `);
+  });
+
+  const entriesToApply =
+    matchingEntries.length > 0
+      ? matchingEntries
+      : minHeadroom === null
+        ? (() => {
+            const geminiEntries = validEntries.filter(([name]) => /gemini/i.test(name));
+            return geminiEntries.length > 0 ? geminiEntries : validEntries;
+          })()
+        : [];
+
+  for (const [name, w] of entriesToApply) {
+    const headroom = 100 - w.usedPercent;
+    if (minHeadroom === null || headroom < minHeadroom) {
+      minHeadroom = headroom;
+      constraint = /window$/i.test(name) ? name : `${name} window`;
+    }
+  }
+
+  return { ...base, headroomPercent: minHeadroom, constraint };
+}
+
 /** The binding constraint for a provider is whichever tracked window/pool is
  * closest to exhaustion — that's what will actually block further work. */
 function computeHeadroom(report: ProviderReport): ProviderHeadroom {
@@ -306,7 +374,9 @@ export function recommendModel(taskProfile: TaskProfile, usage: UsageReport): Re
       const report = usage.providers.find((provider) => provider.provider === r.provider);
       const h = r.provider === "anthropic" && tier === "frontier" && report
         ? computeAnthropicFrontierHeadroom(report)
-        : headroomByProvider.find((candidate) => candidate.provider === r.provider);
+        : r.provider === "antigravity" && report
+          ? computeAntigravityCandidateHeadroom(report, r.model)
+          : headroomByProvider.find((candidate) => candidate.provider === r.provider);
       if (!h) return [];
       return {
         provider: r.provider,

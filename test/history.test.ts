@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { getLifecycleMarkers, pruneHistory, saveLifecycleMarker, saveSnapshot, setPlanAssignment } from "../src/db";
+import { collectAntigravity } from "../src/collectors/antigravity";
 import { buildHistoryResponse, HistoryRequestError } from "../src/history";
 import type { CollectorResult, Provider } from "../src/types";
 
@@ -172,34 +173,57 @@ describe("normalized quota history", () => {
     db.close();
   });
 
-  test("records Antigravity provider plan provenance and falls back to configured plan_tier", () => {
+  test("records Antigravity provider plan provenance, configured plan_tier fallback, and model-only windows", async () => {
     const db = testDb();
-    saveSnapshot(db, {
-      provider: "antigravity",
-      status: "ok",
-      source: "antigravity_local",
-      dataAsOf: 1_000,
-      capturedAt: 1_000,
-      snapshot: {
-        kind: "window",
-        fiveHour: { usedPercent: 22.5, resetsAt: 1_789_000_000_000 },
-        weekly: { usedPercent: 10, resetsAt: 1_789_400_000_000 },
-        extra: {},
-      },
+    const reset5h = 1_789_000_000_000;
+    const resetWeekly = 1_789_400_000_000;
+    const noLocal = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+
+    // Observation 1: structured summary with no provider plan -> falls back to configured plan_tier.
+    const summaryResult = await collectAntigravity({
+      now: () => 1_000,
+      runCommand: noLocal,
+      env: { ANTIGRAVITY_OAUTH_CREDENTIALS_JSON: JSON.stringify({ access_token: "tok-1", expiry_date: 9_000 }) },
+      request: (async (input: Parameters<typeof globalThis.fetch>[0]) => {
+        const url = String(input);
+        if (url.endsWith(":loadCodeAssist")) return Response.json({});
+        if (url.endsWith(":retrieveUserQuotaSummary")) {
+          return Response.json({
+            groups: [{
+              displayName: "Gemini",
+              buckets: [
+                { displayName: "5h", remainingFraction: 0.775, resetTime: reset5h },
+                { displayName: "Weekly", remainingFraction: 0.9, resetTime: resetWeekly },
+              ],
+            }],
+          });
+        }
+        return new Response("not found", { status: 404 });
+      }) as typeof globalThis.fetch,
     });
-    saveSnapshot(db, {
-      provider: "antigravity",
-      status: "ok",
-      source: "antigravity_api",
-      dataAsOf: 3_000,
-      capturedAt: 3_000,
-      snapshot: {
-        kind: "window",
-        fiveHour: { usedPercent: 35, resetsAt: 1_789_000_000_000 },
-        weekly: { usedPercent: 15, resetsAt: 1_789_400_000_000 },
-        extra: { planType: "ultra" },
-      },
+    saveSnapshot(db, summaryResult);
+
+    // Observation 2: model-only fallback with provider-reported Ultra plan -> preserves model:<name> in history.
+    const modelOnlyResult = await collectAntigravity({
+      now: () => 3_000,
+      runCommand: noLocal,
+      env: { ANTIGRAVITY_OAUTH_CREDENTIALS_JSON: JSON.stringify({ access_token: "tok-2", expiry_date: 9_000 }) },
+      request: (async (input: Parameters<typeof globalThis.fetch>[0]) => {
+        const url = String(input);
+        if (url.endsWith(":loadCodeAssist")) return Response.json({ paidTier: { id: "g1-ultra-tier", name: "Google AI Ultra" } });
+        if (url.endsWith(":retrieveUserQuotaSummary")) return new Response("not found", { status: 404 });
+        if (url.endsWith(":fetchAvailableModels")) {
+          return Response.json({
+            models: {
+              "gemini-4-neon": { displayName: "Gemini 4 Neon", quotaInfo: { remainingFraction: 0.65, resetTime: reset5h } },
+            },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      }) as typeof globalThis.fetch,
     });
+    saveSnapshot(db, modelOnlyResult);
+
     setPlanAssignment(
       db,
       { provider: "antigravity", planId: "pro", planLabel: "Google AI Pro", effectiveFrom: 500 },
@@ -214,7 +238,7 @@ describe("normalized quota history", () => {
     expect(history.observations).toHaveLength(2);
     expect(history.observations[0]).toMatchObject({
       provider: "antigravity",
-      source: "antigravity_local",
+      source: "antigravity_api",
       timeSource: "provider",
       plan: { id: "pro", label: "Google AI Pro", source: "configured", effectiveFrom: 500 },
       quota: {
@@ -230,6 +254,12 @@ describe("normalized quota history", () => {
       source: "antigravity_api",
       timeSource: "provider",
       plan: { id: "ultra", label: "ultra", source: "provider", effectiveFrom: null },
+      quota: {
+        kind: "windows",
+        windows: [
+          { id: "model:Gemini 4 Neon", usedPercent: 35, resetsAt: reset5h },
+        ],
+      },
     });
     db.close();
   });

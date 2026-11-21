@@ -191,7 +191,7 @@ export interface ResetsReport {
   generatedAt: number;
   windows: Array<{
     provider: Provider;
-    window: "fiveHour" | "weekly";
+    window: "fiveHour" | "weekly" | string;
     usedPercent: number;
     resetsAt: number | null;
     /** When this reading was collected. It can be older than the newest
@@ -247,6 +247,18 @@ export function buildResetsReport(
           resetsAt: latest.snapshot.weekly.resetsAt,
           capturedAt: latest.capturedAt,
         });
+      }
+      if (latest.snapshot.modelWindows) {
+        for (const [name, modelWindow] of Object.entries(latest.snapshot.modelWindows)) {
+          if (!modelWindow || !Number.isFinite(modelWindow.usedPercent)) continue;
+          windows.push({
+            provider,
+            window: `model:${name}`,
+            usedPercent: modelWindow.usedPercent,
+            resetsAt: modelWindow.resetsAt,
+            capturedAt: latest.capturedAt,
+          });
+        }
       }
     } else if (latest.snapshot.kind === "pool") {
       pools.push({
