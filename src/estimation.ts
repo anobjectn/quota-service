@@ -220,11 +220,22 @@ function minPrimaryWindowHeadroom(
   return { headroomPercent: minHeadroom, constraint };
 }
 
+const TRAILING_CADENCE_PARENS =
+  /\s*\(\s*(?:(?:5\s*h(?:our|r)?s?|five[\s-]*hour|session|weekly|week|7\s*d(?:ay)?s?|seven[\s-]*day|\d+(?:\.\d+)?\s*[smhd]|quota|limit|window)[\s,-]*)+\)\s*$/i;
+const TRAILING_CADENCE_WORDS =
+  /(?:\s+(?:5\s*h(?:our|r)?s?|five\s+hour|session|weekly|week|7\s*d(?:ay)?s?|seven\s+day|\d+(?:\.\d+)?[smhd]|quota|limit|window))+$/i;
+
+/** Normalizes a label-only model window key (when no canonical ID is recorded)
+ * by stripping only recognized trailing cadence/duration/quota qualifiers while
+ * preserving variant names such as "Lite" or "(Lite)". */
 function normalizeModelMatchKey(value: string): string {
-  return value
+  const withoutTrailingCadenceParens = value.trim().replace(TRAILING_CADENCE_PARENS, "");
+  return withoutTrailingCadenceParens
     .toLowerCase()
-    .replace(/\([^)]*\)/g, " ")
+    .replace(/[()[\]]+/g, " ")
     .replace(/[-_\s]+/g, " ")
+    .trim()
+    .replace(TRAILING_CADENCE_WORDS, "")
     .trim();
 }
 
@@ -251,12 +262,12 @@ function extractModelWindowIds(extra: Record<string, unknown> | undefined): Reco
 
 /** For Antigravity candidates, the binding constraint is the MINIMUM headroom
  * across any shared limits (`fiveHour`, `weekly`) AND any `modelWindows` entry
- * targeting that specific candidate model — matched by exact normalized label
- * (ignoring parenthetical cadence/duration tags like `(5h)`/`(weekly)`/`(1h)`)
- * or by canonical model ID in `snapshot.extra.modelWindowIds`. Unrelated models'
- * buckets are never borrowed: if neither shared limits nor a matching model
- * window exist for a candidate, its headroom is `null` (unknown) so ranking
- * falls back honestly to a measured tier. */
+ * targeting that specific candidate model — matched exclusively by canonical
+ * model/group ID in `snapshot.extra.modelWindowIds` when present, or by exact
+ * normalized label (stripping only recognized trailing cadence/duration tags)
+ * when no ID is recorded. Unrelated models' buckets are never borrowed: if
+ * neither shared limits nor a matching model window exist for a candidate, its
+ * headroom is `null` (unknown) so ranking falls back honestly to a measured tier. */
 function computeAntigravityCandidateHeadroom(
   report: ProviderReport,
   option: ModelOption,
@@ -279,10 +290,12 @@ function computeAntigravityCandidateHeadroom(
 
     for (const [name, w] of Object.entries(modelWindows)) {
       if (!w || !Number.isFinite(w.usedPercent)) continue;
-      const labelMatches = normalizeModelMatchKey(name) === targetKey;
       const recordedId = windowIds[name];
-      const idMatches = recordedId != null && targetIds.has(normalizeCanonicalModelId(recordedId));
-      if (!labelMatches && !idMatches) continue;
+      const matches =
+        recordedId != null
+          ? targetIds.has(normalizeCanonicalModelId(recordedId))
+          : normalizeModelMatchKey(name) === targetKey;
+      if (!matches) continue;
 
       const headroom = 100 - w.usedPercent;
       if (minHeadroom === null || headroom < minHeadroom) {
@@ -317,17 +330,17 @@ function computeHeadroom(report: ProviderReport): ProviderHeadroom {
       report.snapshot.fiveHour,
       report.snapshot.weekly,
     ));
-    // When a provider only reports per-model buckets (e.g. Antigravity
-    // per-model fallback when cadence cannot be mapped to 5h/weekly),
-    // compute provider-level headroom summary from modelWindows rather than null.
-    if (minHeadroom === null && report.snapshot.modelWindows) {
+    // When Antigravity only reports per-model buckets (e.g. per-model fallback
+    // when cadence cannot be mapped to 5h/weekly), summarize provider-level
+    // headroom from Gemini modelWindows (checked by label or canonical ID).
+    if (minHeadroom === null && report.provider === "antigravity" && report.snapshot.modelWindows) {
+      const windowIds = extractModelWindowIds(report.snapshot.extra);
       const entries = Object.entries(report.snapshot.modelWindows).filter(
         ([, w]) => w != null && Number.isFinite(w.usedPercent),
       );
-      const preferred =
-        report.provider === "antigravity"
-          ? entries.filter(([name]) => /gemini/i.test(name))
-          : entries;
+      const preferred = entries.filter(
+        ([name]) => /gemini/i.test(name) || /gemini/i.test(windowIds[name] ?? ""),
+      );
       const sourceEntries = preferred.length > 0 ? preferred : entries;
       for (const [name, w] of sourceEntries) {
         const headroom = 100 - w.usedPercent;

@@ -348,6 +348,67 @@ describe("Antigravity normalization helpers", () => {
       "Gemini 4 Argon (1h)": { usedPercent: 100, resetsAt: null },
       "Claude / GPT (1h)": { usedPercent: 20, resetsAt: null },
     });
+    expect(multiGroup!.extra?.modelWindowIds).toEqual({
+      "Gemini 4 Neon (weekly)": "Gemini 4 Neon",
+      "Gemini 4 Argon (1h)": "Gemini 4 Argon",
+      "Claude / GPT (1h)": "Claude / GPT",
+    });
+
+    // Distinct named buckets sharing a cadence inside one non-primary group keep independent reset schedules.
+    const t1 = "2027-01-15T10:00:00Z";
+    const t2 = "2027-01-15T11:00:00Z";
+    const sameCadence = normalizeQuotaSummary({
+      groups: [{
+        displayName: "Gemini 4 Argon",
+        buckets: [
+          { bucketId: "interactive", displayName: "Interactive", window: "18000s", remainingFraction: 0.9, resetTime: t1 },
+          { bucketId: "background", displayName: "Background", window: "18000s", remainingFraction: 0.2, resetTime: t2 },
+        ],
+      }],
+    });
+    expect(sameCadence).not.toBeNull();
+    expect(sameCadence!.modelWindows).toEqual({
+      "Gemini 4 Argon (Interactive, 5h)": { usedPercent: 10, resetsAt: Date.parse(t1) },
+      "Gemini 4 Argon (Background, 5h)": { usedPercent: 80, resetsAt: Date.parse(t2) },
+    });
+    expect(sameCadence!.extra?.modelWindowIds).toEqual({
+      "Gemini 4 Argon (Interactive, 5h)": "Gemini 4 Argon",
+      "Gemini 4 Argon (Background, 5h)": "Gemini 4 Argon",
+    });
+
+    // Model-specific bucket listed first inside shared Gemini group never steals shared weekly from generic Weekly.
+    const modelFirst = normalizeQuotaSummary({
+      groups: [{
+        displayName: "Gemini",
+        buckets: [
+          { displayName: "Gemini 4 Neon weekly", remainingFraction: 0 },
+          { displayName: "Weekly", remainingFraction: 0.9 },
+        ],
+      }],
+    });
+    expect(modelFirst).not.toBeNull();
+    expect(modelFirst!.weekly).toEqual({ usedPercent: 10, resetsAt: null });
+    expect(modelFirst!.modelWindows).toEqual({
+      "Gemini 4 Neon weekly": { usedPercent: 100, resetsAt: null },
+    });
+  });
+
+  test("disambiguates colliding display names across distinct canonical model IDs regardless of payload order", () => {
+    const snap = normalizeAvailableModels({
+      models: {
+        "gemini-4-argon": { displayName: "Gemini 4", quotaInfo: { remainingFraction: 0.9 } },
+        "gemini-4-neon": { displayName: "Gemini 4", quotaInfo: { remainingFraction: 0.0 } },
+      },
+    });
+    expect(snap).not.toBeNull();
+    expect(snap!.modelWindows).toEqual({
+      "Gemini 4 [gemini-4-argon]": { usedPercent: 10, resetsAt: null },
+      "Gemini 4 [gemini-4-neon]": { usedPercent: 100, resetsAt: null },
+    });
+    expect(snap!.extra?.modelWindowIds).toEqual({
+      "Gemini 4 [gemini-4-argon]": "gemini-4-argon",
+      "Gemini 4 [gemini-4-neon]": "gemini-4-neon",
+    });
   });
 
   test("keeps per-model fallback horizons (2d, 4d, 20d) stably in modelWindows and records canonical modelWindowIds", () => {
@@ -1165,6 +1226,24 @@ describe("Antigravity Tactic B (antigravity_api)", () => {
     expect(hungResult.source).toBe("antigravity_api");
     expect(hungResult.error).toContain("budget");
     expect(hungCalls.length).toBeLessThanOrEqual(2);
+
+    // Case 3: stalled OAuth credential read is bounded by the outer collector deadline.
+    const credStart = Date.now();
+    const credTimeoutResult = await collectAntigravity({
+      request: hungRequest,
+      runCommand: noLocalServer,
+      now: () => NOW,
+      localProbeBudgetMs: 50,
+      cloudApiBudgetMs: 120,
+      env: { QUOTA_ANTIGRAVITY_AUTH_PATH: "/stalled/oauth.json" },
+      readFileText: async () => {
+        await new Promise((r) => setTimeout(r, 800));
+        return JSON.stringify({ access_token: "late-tok", expiry_date: NOW + 3600_000 });
+      },
+    });
+    expect(Date.now() - credStart).toBeLessThan(500);
+    expect(credTimeoutResult.status).toBe("unavailable");
+    expect(credTimeoutResult.error).toContain("budget");
   });
 
   test("returns unavailable cleanly when neither local server nor OAuth credentials exist", async () => {

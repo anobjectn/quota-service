@@ -663,6 +663,18 @@ function labelContainsGroup(label: string, groupLabel: string): boolean {
   return normLabel === normGroup || normLabel.includes(normGroup);
 }
 
+function isSharedPrimaryBucketLabel(label: string | null, groupLabel: string): boolean {
+  if (label === null) return true;
+  if (isGenericBucketLabel(label, groupLabel)) return true;
+  const normLabel = label.toLowerCase().replace(/[-_\s]+/g, " ").trim();
+  const normGroup = groupLabel.toLowerCase().replace(/[-_\s]+/g, " ").trim();
+  if (normGroup && normLabel.startsWith(`${normGroup} `)) {
+    const remainder = normLabel.slice(normGroup.length).trim();
+    if (isGenericBucketLabel(remainder, groupLabel)) return true;
+  }
+  return false;
+}
+
 function formatModelWindowKey(
   groupLabel: string,
   bucketLabel: string | null,
@@ -679,22 +691,27 @@ function formatModelWindowKey(
     // Non-primary groups represent a distinct model or pool (e.g. "Gemini 4 Argon",
     // "Gemini 4 Neon", "Claude / GPT"). Never drop the group identity.
     const bucketIsSpecific = bucketLabel !== null && !isGenericBucketLabel(bucketLabel, groupLabel);
-    const baseLabel =
-      bucketIsSpecific && labelContainsGroup(bucketLabel, groupLabel) ? bucketLabel : groupLabel;
-    const qualifier =
-      cadenceSuffix ??
-      (bucketIsSpecific && !labelContainsGroup(bucketLabel, groupLabel)
-        ? bucketLabel
-        : durationSuffix);
+    const bucketIncludesGroup = bucketIsSpecific && labelContainsGroup(bucketLabel, groupLabel);
+    const baseLabel = bucketIncludesGroup ? bucketLabel : groupLabel;
+    const distinctBucketQualifier =
+      bucketIsSpecific && !bucketIncludesGroup ? bucketLabel : null;
+    const timeQualifier = cadenceSuffix ?? durationSuffix;
 
-    if (qualifier) {
+    const qualifierParts: string[] = [];
+    if (distinctBucketQualifier) qualifierParts.push(distinctBucketQualifier);
+    if (timeQualifier) {
       const alreadyTagged =
         (cadence === "fiveHour" && /\b5h\b|\b5[\s-]*hour/i.test(baseLabel)) ||
         (cadence === "weekly" && /\bweekly\b|\b7d\b/i.test(baseLabel)) ||
-        baseLabel.toLowerCase().includes(`(${qualifier.toLowerCase()})`);
-      if (!alreadyTagged) {
-        return `${baseLabel} (${qualifier})`;
-      }
+        baseLabel.toLowerCase().includes(`(${timeQualifier.toLowerCase()})`) ||
+        (distinctBucketQualifier !== null &&
+          ((cadence === "fiveHour" && /\b5h\b|\b5[\s-]*hour/i.test(distinctBucketQualifier)) ||
+            (cadence === "weekly" && /\bweekly\b|\b7d\b/i.test(distinctBucketQualifier))));
+      if (!alreadyTagged) qualifierParts.push(timeQualifier);
+    }
+
+    if (qualifierParts.length > 0) {
+      return `${baseLabel} (${qualifierParts.join(", ")})`;
     }
     return baseLabel;
   }
@@ -784,6 +801,7 @@ export function normalizeQuotaSummary(
 
   interface ParsedGroup {
     label: string;
+    modelId: string | null;
     buckets: ParsedBucket[];
     score: number;
   }
@@ -792,7 +810,13 @@ export function normalizeQuotaSummary(
   for (const group of rawGroups) {
     if (!group || typeof group !== "object" || Array.isArray(group)) continue;
     const rawBuckets = Array.isArray(group.buckets) ? group.buckets : [];
-    const groupLabel = nonEmptyString(group.displayName) ?? nonEmptyString(group.name) ?? "";
+    const displayName = nonEmptyString(group.displayName);
+    const rawName = nonEmptyString(group.name);
+    const groupLabel = displayName ?? rawName ?? "";
+    const groupModelId =
+      rawName && /^(?:models\/)?(?:gemini|claude|gpt|oss)[-_a-z0-9.]+$/i.test(rawName)
+        ? rawName
+        : groupLabel || null;
     const parsedBuckets: ParsedBucket[] = [];
     for (const bucket of rawBuckets) {
       if (!bucket || typeof bucket !== "object" || Array.isArray(bucket)) continue;
@@ -816,6 +840,7 @@ export function normalizeQuotaSummary(
     const hasWeekly = parsedBuckets.some((b) => b.cadence === "weekly");
     parsedGroups.push({
       label: groupLabel,
+      modelId: groupModelId,
       buckets: parsedBuckets,
       score: primaryGeminiGroupScore(groupLabel, hasFiveHour, hasWeekly),
     });
@@ -837,17 +862,22 @@ export function normalizeQuotaSummary(
   let fiveHour: WindowQuota | null = null;
   let weekly: WindowQuota | null = null;
   const modelWindows: Record<string, WindowQuota> = {};
+  const modelWindowIds: Record<string, string> = {};
 
   const pickBestBucketIndex = (
     buckets: ParsedBucket[],
     cadence: "fiveHour" | "weekly",
     targetSeconds: number,
+    groupLabel: string,
   ): number => {
     let bestIdx = -1;
     let bestDiff = Number.POSITIVE_INFINITY;
     for (let j = 0; j < buckets.length; j++) {
       const bucket = buckets[j]!;
       if (bucket.cadence !== cadence) continue;
+      // Never promote a model-specific bucket (e.g. "Gemini 4 Neon weekly") inside
+      // the shared primary group into the shared fiveHour/weekly slot.
+      if (!isSharedPrimaryBucketLabel(bucket.label, groupLabel)) continue;
       const diff = bucket.durationSeconds !== null
         ? Math.abs(bucket.durationSeconds - targetSeconds)
         : Number.POSITIVE_INFINITY;
@@ -878,8 +908,18 @@ export function normalizeQuotaSummary(
     const group = parsedGroups[i]!;
     const displayGroupLabel = group.label || "Antigravity";
     if (i === primaryIndex) {
-      const bestFiveHourIdx = pickBestBucketIndex(group.buckets, "fiveHour", FIVE_HOUR_TARGET_SECONDS);
-      const bestWeeklyIdx = pickBestBucketIndex(group.buckets, "weekly", WEEKLY_TARGET_SECONDS);
+      const bestFiveHourIdx = pickBestBucketIndex(
+        group.buckets,
+        "fiveHour",
+        FIVE_HOUR_TARGET_SECONDS,
+        displayGroupLabel,
+      );
+      const bestWeeklyIdx = pickBestBucketIndex(
+        group.buckets,
+        "weekly",
+        WEEKLY_TARGET_SECONDS,
+        displayGroupLabel,
+      );
       if (bestFiveHourIdx >= 0) fiveHour = group.buckets[bestFiveHourIdx]!.quota;
       if (bestWeeklyIdx >= 0) weekly = group.buckets[bestWeeklyIdx]!.quota;
 
@@ -898,25 +938,47 @@ export function normalizeQuotaSummary(
       }
       continue;
     }
-    for (const bucket of group.buckets) {
-      const key = formatModelWindowKey(
+
+    // Precompute candidate keys for non-primary group buckets so two distinct
+    // buckets with the same cadence and no distinct displayName still stay
+    // separate via their bucketId rather than overwriting one another's resetTime.
+    const tentativeKeys = group.buckets.map((bucket) =>
+      formatModelWindowKey(
         displayGroupLabel,
         fallbackBucketLabel(bucket, group.buckets.length, false),
         bucket.cadence,
         bucket.durationSeconds,
         group.buckets.length,
         false,
-      );
+      ),
+    );
+    const keyCounts = new Map<string, number>();
+    for (const k of tentativeKeys) {
+      keyCounts.set(k, (keyCounts.get(k) ?? 0) + 1);
+    }
+
+    for (let j = 0; j < group.buckets.length; j++) {
+      const bucket = group.buckets[j]!;
+      let key = tentativeKeys[j]!;
+      if ((keyCounts.get(key) ?? 0) > 1 && bucket.id) {
+        key = `${key} [${bucket.id}]`;
+      }
       insertModelWindow(modelWindows, key, bucket.quota);
+      if (group.modelId) {
+        modelWindowIds[key] = group.modelId;
+      }
     }
   }
+
+  const extraFields: Record<string, unknown> =
+    Object.keys(modelWindowIds).length > 0 ? { modelWindowIds } : {};
 
   const snapshot: WindowSnapshot = {
     kind: "window",
     fiveHour,
     weekly,
     modelWindows,
-    extra: buildExtra(plan, endpoint),
+    extra: buildExtra(plan, endpoint, extraFields),
   };
   return hasQuotaData(snapshot) ? snapshot : null;
 }
@@ -956,13 +1018,30 @@ function normalizeModelEntries(
 ): WindowSnapshot | null {
   if (entries.length === 0) return null;
 
+  // Disambiguate colliding display labels across distinct canonical model IDs
+  // deterministically (independent of payload order) so neither model's quota
+  // or canonical ID is lost, while duplicate buckets for the same modelId
+  // still collapse onto the tighter constraint.
+  const idsByLabel = new Map<string, Set<string>>();
+  for (const entry of entries) {
+    if (!entry.modelId) continue;
+    const set = idsByLabel.get(entry.label) ?? new Set<string>();
+    set.add(entry.modelId.toLowerCase());
+    idsByLabel.set(entry.label, set);
+  }
+
   const modelWindows: Record<string, WindowQuota> = {};
   const modelWindowIds: Record<string, string> = {};
   for (const entry of entries) {
-    const existing = modelWindows[entry.label];
-    insertModelWindow(modelWindows, entry.label, entry.quota);
+    const distinctIds = idsByLabel.get(entry.label);
+    const key =
+      entry.modelId && distinctIds && distinctIds.size > 1
+        ? `${entry.label} [${entry.modelId}]`
+        : entry.label;
+    const existing = modelWindows[key];
+    insertModelWindow(modelWindows, key, entry.quota);
     if (entry.modelId && (!existing || entry.quota.usedPercent > existing.usedPercent)) {
-      modelWindowIds[entry.label] = entry.modelId;
+      modelWindowIds[key] = entry.modelId;
     }
   }
 
@@ -1682,6 +1761,23 @@ async function collectFromCloudApi(
   return unavailableCloudResult(capturedAt, lastError ?? "Cloud Code API returned no usable quota data");
 }
 
+async function withDeadline<T>(
+  promise: Promise<T>,
+  deadline: number,
+): Promise<{ timedOut: false; value: T } | { timedOut: true }> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return { timedOut: true };
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<{ timedOut: true }>((resolve) => {
+    timer = setTimeout(() => resolve({ timedOut: true }), remaining);
+  });
+  const settled = promise.then((value) => ({ timedOut: false as const, value }));
+  settled.catch(() => undefined);
+  const outcome = await Promise.race([settled, timeout]);
+  if (timer) clearTimeout(timer);
+  return outcome;
+}
+
 /** Public entry point: try local Antigravity language_server/agy first, then read-only Cloud Code OAuth fallback. */
 export async function collectAntigravity(
   dependencies: AntigravityCollectorDependencies = {},
@@ -1696,7 +1792,8 @@ export async function collectAntigravity(
 
   const localBudgetMs = dependencies.localProbeBudgetMs ?? LOCAL_PROBE_BUDGET_MS;
   const cloudBudgetMs = dependencies.cloudApiBudgetMs ?? CLOUD_API_BUDGET_MS;
-  const overallDeadline = Date.now() + Math.min(TOTAL_COLLECT_BUDGET_MS, localBudgetMs + cloudBudgetMs);
+  const effectiveTotalBudgetMs = Math.min(TOTAL_COLLECT_BUDGET_MS, localBudgetMs + cloudBudgetMs);
+  const overallDeadline = Date.now() + effectiveTotalBudgetMs;
 
   // Tactic A: local Antigravity language_server / agy Connect-RPC.
   const local = await collectFromLocalServer(
@@ -1709,10 +1806,22 @@ export async function collectAntigravity(
     return local.result;
   }
 
-  // Tactic B: read-only Cloud Code OAuth fallback.
-  const creds = dependencies.readOauthCredentials
-    ? await dependencies.readOauthCredentials()
-    : await readDefaultOauthCredentials(env, readFileText, getHome, capturedAt);
+  // Tactic B: read-only Cloud Code OAuth fallback (credential acquisition is
+  // also bounded by the outer deadline so a stalled filesystem read cannot
+  // overrun the collector budget).
+  const credsOutcome = await withDeadline(
+    dependencies.readOauthCredentials
+      ? dependencies.readOauthCredentials()
+      : readDefaultOauthCredentials(env, readFileText, getHome, capturedAt),
+    overallDeadline,
+  );
+  if (credsOutcome.timedOut) {
+    return unavailableCloudResult(
+      capturedAt,
+      `Antigravity collector exceeded its ${effectiveTotalBudgetMs}ms budget while reading OAuth credentials`,
+    );
+  }
+  const creds = credsOutcome.value;
 
   if (!creds.ok) {
     const detail = local.found && local.error
@@ -1731,7 +1840,7 @@ export async function collectAntigravity(
 
   const remainingCloudBudgetMs = Math.min(cloudBudgetMs, Math.max(0, overallDeadline - Date.now()));
   if (remainingCloudBudgetMs <= 0) {
-    return unavailableCloudResult(capturedAt, `Antigravity collector exceeded its ${TOTAL_COLLECT_BUDGET_MS}ms budget`);
+    return unavailableCloudResult(capturedAt, `Antigravity collector exceeded its ${effectiveTotalBudgetMs}ms budget`);
   }
 
   return collectFromCloudApi(

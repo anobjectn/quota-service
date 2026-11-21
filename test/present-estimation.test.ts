@@ -274,8 +274,55 @@ test("recommendation matches canonical model IDs when display labels differ and 
   expect(byId.recommendation?.model).toBe("Gemini 4 Argon");
   expect(byId.recommendation?.headroomPercent).toBe(90);
   expect(byId.warnings.some((w) => w.includes('falling back to adjacent tier "mid"'))).toBe(true);
+  // Provider-level headroom summary also sees "Neon" as a Gemini bucket via modelWindowIds.
+  expect(byId.headroomByProvider[0]?.headroomPercent).toBe(0);
+  expect(byId.headroomByProvider[0]?.constraint).toBe("Neon window");
 
-  // Exhausted "Gemini 4 Argon Lite" must not constrain "Gemini 4 Argon".
+  // Colliding display names ("Gemini 4") stay separate by canonical ID.
+  const collidingSnap = normalizeAvailableModels({
+    models: {
+      "gemini-4-argon": { displayName: "Gemini 4", quotaInfo: { remainingFraction: 0.9 } },
+      "gemini-4-neon": { displayName: "Gemini 4", quotaInfo: { remainingFraction: 0.0 } },
+    },
+  });
+  expect(collidingSnap).not.toBeNull();
+  const collidingRec = recommendModel("feature", {
+    generatedAt: now,
+    providers: [{
+      provider: "antigravity",
+      status: "ok",
+      source: "antigravity_api",
+      dataAgeMs: 0,
+      capturedAt: now,
+      snapshot: collidingSnap,
+      manualEntries: [],
+    }],
+  });
+  expect(collidingRec.recommendation?.model).toBe("Gemini 4 Argon");
+  expect(collidingRec.recommendation?.headroomPercent).toBe(90);
+
+  // Exhausted "Gemini 4 Argon Lite" and parenthesized "Gemini 4 Argon (Lite)" must not constrain "Gemini 4 Argon".
+  const parenthesizedSnap = normalizeAvailableModels({
+    models: {
+      "gemini-4-argon": { displayName: "Gemini 4 Argon", quotaInfo: { remainingFraction: 0.9 } },
+      "gemini-4-argon-lite": { displayName: "Gemini 4 Argon (Lite)", quotaInfo: { remainingFraction: 0.0 } },
+    },
+  });
+  const parenthesizedRec = recommendModel("feature", {
+    generatedAt: now,
+    providers: [{
+      provider: "antigravity",
+      status: "ok",
+      source: "antigravity_api",
+      dataAgeMs: 0,
+      capturedAt: now,
+      snapshot: parenthesizedSnap,
+      manualEntries: [],
+    }],
+  });
+  expect(parenthesizedRec.recommendation?.model).toBe("Gemini 4 Argon");
+  expect(parenthesizedRec.recommendation?.headroomPercent).toBe(90);
+
   const variant = recommendModel("feature", {
     generatedAt: now,
     providers: [{
@@ -290,6 +337,7 @@ test("recommendation matches canonical model IDs when display labels differ and 
         weekly: null,
         modelWindows: {
           "Gemini 4 Argon Lite": { usedPercent: 100, resetsAt: now + 3_600_000 },
+          "Gemini 4 Argon (Lite)": { usedPercent: 100, resetsAt: now + 3_600_000 },
           "Gemini 4 Argon": { usedPercent: 10, resetsAt: now + 3_600_000 },
         },
       },
@@ -298,6 +346,59 @@ test("recommendation matches canonical model IDs when display labels differ and 
   });
   expect(variant.recommendation?.model).toBe("Gemini 4 Argon");
   expect(variant.recommendation?.headroomPercent).toBe(90);
+
+  // Non-primary group-prefixed cadence labels ("Gemini 4 Argon 5-hour", "Gemini 4 Argon - Weekly")
+  // still match Gemini 4 Argon via extra.modelWindowIds and avoid recommending it when exhausted.
+  for (const bucketLabel of ["Gemini 4 Argon 5-hour", "Gemini 4 Argon - Weekly", "Gemini 4 Argon Weekly Limit"]) {
+    const prefixedSnap = normalizeQuotaSummary({
+      groups: [
+        { displayName: "Gemini", buckets: [{ displayName: "Session", remainingFraction: 0.9 }] },
+        { displayName: "Gemini 4 Argon", buckets: [{ displayName: bucketLabel, remainingFraction: 0.0 }] },
+      ],
+    });
+    expect(prefixedSnap).not.toBeNull();
+    const prefixedRec = recommendModel("feature", {
+      generatedAt: now,
+      providers: [{
+        provider: "antigravity",
+        status: "ok",
+        source: "antigravity_local",
+        dataAgeMs: 0,
+        capturedAt: now,
+        snapshot: prefixedSnap,
+        manualEntries: [],
+      }],
+    });
+    expect(prefixedRec.recommendation?.model).toBe("Gemini 3.8 Flash");
+    expect(prefixedRec.recommendation?.headroomPercent).toBe(90);
+  }
+
+  // Non-Antigravity provider (Anthropic) with only modelWindows keeps null provider headroom
+  // (unchanged from base: light/mid stay unmeasured, while frontier still uses computeAnthropicFrontierHeadroom).
+  const anthUsage: UsageReport = {
+    generatedAt: now,
+    providers: [{
+      provider: "anthropic",
+      status: "ok",
+      source: "anthropic_api",
+      dataAgeMs: 0,
+      capturedAt: now,
+      snapshot: {
+        kind: "window",
+        fiveHour: null,
+        weekly: null,
+        modelWindows: { Fable: { usedPercent: 20, resetsAt: now + 86_400_000 } },
+      },
+      manualEntries: [],
+    }],
+  };
+  const anthLight = recommendModel("small_fix", anthUsage);
+  expect(anthLight.headroomByProvider[0]?.headroomPercent).toBeNull();
+  expect(anthLight.recommendation?.headroomPercent).toBeNull();
+  const anthMid = recommendModel("feature", anthUsage);
+  expect(anthMid.headroomByProvider[0]?.headroomPercent).toBeNull();
+  expect(anthMid.recommendation?.model).toBe("Fable 5 / Opus 4.8");
+  expect(anthMid.recommendation?.headroomPercent).toBe(80);
 
   // Non-primary 1h and "Weekly quota" buckets preserve group identity so recommendation avoids exhausted models.
   const argonExhaustedSnap = normalizeQuotaSummary({
