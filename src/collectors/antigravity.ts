@@ -16,6 +16,12 @@ export const ANTIGRAVITY_POLL_FLOOR_MS = 60_000;
 
 const FETCH_TIMEOUT_MS = 10_000;
 const SUBPROCESS_TIMEOUT_MS = 5_000;
+/** Loopback RPCs answer in milliseconds; a port that holds the connection open
+ * (e.g. a raw LSP socket) must not eat the collect-on-query budget. */
+const LOCAL_FETCH_TIMEOUT_MS = 2_000;
+/** Total time for local discovery and probing, leaving room inside collect.ts's
+ * 12s attempt ceiling for the Cloud Code OAuth fallback. */
+const LOCAL_PROBE_BUDGET_MS = 5_000;
 
 const FIVE_HOUR_MAX_MS = 6 * 3600 * 1000;
 const WEEKLY_MIN_MS = 3 * 24 * 3600 * 1000;
@@ -76,6 +82,7 @@ export interface AntigravityCollectorDependencies {
   readFileText?: (path: string) => Promise<string | null>;
   homedir?: () => string;
   arch?: string;
+  localProbeBudgetMs?: number;
 }
 
 interface QuotaSummaryRemainingPayload {
@@ -261,6 +268,7 @@ export function normalizeAntigravityPlanType(raw: string | null | undefined): st
   if (lower === "pro" || lower.includes("ai pro") || lower.includes("g1 pro") || lower.includes("ai premium")) {
     return "pro";
   }
+  if (lower === "plus" || lower.includes("ai plus") || lower.includes("g1 plus")) return "plus";
   if (lower === "enterprise" || lower.includes("enterprise")) return "enterprise";
   if (lower === "standard" || lower.includes("standard tier") || lower.includes("code assist standard")) {
     return "standard";
@@ -273,16 +281,24 @@ function extractPlanFromUserStatus(body: GetUserStatusResponse | null | undefine
   const userStatus = body?.userStatus;
   const planInfo = userStatus?.planStatus?.planInfo;
   const userTier = userStatus?.userTier;
-  const rawPlanName =
+  // `userTier` carries the actual subscription tier; `planInfo` can report a
+  // generic "Pro" for Ultra accounts, so it is only a fallback.
+  const tierName = nonEmptyString(userTier?.name);
+  const tierId = nonEmptyString(userTier?.id);
+  const planInfoName =
     nonEmptyString(planInfo?.planDisplayName) ??
     nonEmptyString(planInfo?.displayName) ??
     nonEmptyString(planInfo?.planName) ??
     nonEmptyString(planInfo?.productName) ??
-    nonEmptyString(planInfo?.planShortName) ??
-    nonEmptyString(userTier?.name) ??
-    nonEmptyString(userTier?.id);
-  const tierId = nonEmptyString(userTier?.id);
-  const planType = normalizeAntigravityPlanType(rawPlanName) ?? normalizeAntigravityPlanType(tierId);
+    nonEmptyString(planInfo?.planShortName);
+  const tierIdPlanType = normalizeAntigravityPlanType(tierId);
+  const recognizedTierId = tierIdPlanType !== tierId ? tierIdPlanType : null;
+  const rawPlanName = tierName ?? planInfoName ?? tierId;
+  const planType =
+    normalizeAntigravityPlanType(tierName) ??
+    recognizedTierId ??
+    normalizeAntigravityPlanType(planInfoName) ??
+    tierIdPlanType;
   return {
     planType,
     rawPlanName,
@@ -1005,7 +1021,12 @@ async function postLoopbackRpc(
   port: number,
   method: string,
   csrfToken: string | null,
+  deadline: number,
 ): Promise<{ ok: true; status: number; body: Record<string, unknown> } | { ok: false; transportError: boolean; error: string }> {
+  const timeoutMs = Math.min(LOCAL_FETCH_TIMEOUT_MS, deadline - Date.now());
+  if (timeoutMs <= 0) {
+    return { ok: false, transportError: true, error: `${method}: local probe budget exhausted` };
+  }
   const url = `${scheme}://127.0.0.1:${port}${LOCAL_RPC_PREFIX}/${method}`;
   const parsed = new URL(url);
   const headers: Record<string, string> = {
@@ -1018,7 +1039,7 @@ async function postLoopbackRpc(
     method: "POST",
     headers,
     body: JSON.stringify(LOCAL_RPC_METADATA),
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   };
   // Scope self-signed TLS acceptance strictly to 127.0.0.1 loopback HTTPS.
   if (parsed.protocol === "https:" && parsed.hostname === "127.0.0.1") {
@@ -1050,8 +1071,9 @@ async function queryLocalTarget(
   port: number,
   csrfToken: string | null,
   capturedAt: number,
+  deadline: number,
 ): Promise<{ snapshot: WindowSnapshot | null; transportError: boolean; error: string | null }> {
-  const summaryRes = await postLoopbackRpc(request, scheme, port, "RetrieveUserQuotaSummary", csrfToken);
+  const summaryRes = await postLoopbackRpc(request, scheme, port, "RetrieveUserQuotaSummary", csrfToken, deadline);
   if (!summaryRes.ok && summaryRes.transportError) {
     return { snapshot: null, transportError: true, error: summaryRes.error };
   }
@@ -1063,7 +1085,7 @@ async function queryLocalTarget(
       const baseSnapshot = normalizeQuotaSummary(payload, capturedAt, null, "RetrieveUserQuotaSummary");
       if (baseSnapshot) {
         // Enrich plan/tier from GetUserStatus on the same working loopback target (best-effort).
-        const statusRes = await postLoopbackRpc(request, scheme, port, "GetUserStatus", csrfToken);
+        const statusRes = await postLoopbackRpc(request, scheme, port, "GetUserStatus", csrfToken, deadline);
         if (statusRes.ok) {
           plan = extractPlanFromUserStatus(statusRes.body as GetUserStatusResponse);
         }
@@ -1083,7 +1105,7 @@ async function queryLocalTarget(
   let planFromStatus: PlanMetadata | null = null;
   let lastError = summaryRes.ok ? "RetrieveUserQuotaSummary returned no usable quota groups" : summaryRes.error;
 
-  const statusRes = await postLoopbackRpc(request, scheme, port, "GetUserStatus", csrfToken);
+  const statusRes = await postLoopbackRpc(request, scheme, port, "GetUserStatus", csrfToken, deadline);
   if (statusRes.ok) {
     const statusBody = statusRes.body as GetUserStatusResponse;
     planFromStatus = extractPlanFromUserStatus(statusBody);
@@ -1098,7 +1120,7 @@ async function queryLocalTarget(
   }
 
   // Fallback 2: GetCommandModelConfigs.
-  const cmdRes = await postLoopbackRpc(request, scheme, port, "GetCommandModelConfigs", csrfToken);
+  const cmdRes = await postLoopbackRpc(request, scheme, port, "GetCommandModelConfigs", csrfToken, deadline);
   if (cmdRes.ok) {
     const cmdBody = cmdRes.body as GetCommandModelConfigsResponse;
     const snapshot = normalizeModelConfigs(
@@ -1122,8 +1144,12 @@ async function collectFromLocalServer(
   request: typeof globalThis.fetch,
   runCommand: (argv: string[], timeoutMs: number) => Promise<AntigravityCommandOutput>,
   capturedAt: number,
+  budgetMs: number,
 ): Promise<{ found: boolean; result: CollectorResult | null; error: string | null }> {
-  const ps = await runCommand(["ps", "-ax", "-o", "pid=,command="], SUBPROCESS_TIMEOUT_MS);
+  const deadline = Date.now() + budgetMs;
+  const remainingMs = () => deadline - Date.now();
+  const budgetError = `local Antigravity probe exceeded its ${budgetMs}ms budget`;
+  const ps = await runCommand(["ps", "-ax", "-o", "pid=,command="], Math.min(SUBPROCESS_TIMEOUT_MS, budgetMs));
   if (ps.exitCode !== 0) {
     return { found: false, result: null, error: `ps failed: ${ps.stderr.trim() || `exit ${ps.exitCode}`}` };
   }
@@ -1133,10 +1159,14 @@ async function collectFromLocalServer(
   }
 
   let lastError: string | null = null;
-  for (const proc of processes) {
+  probe: for (const proc of processes) {
+    if (remainingMs() <= 0) {
+      lastError = budgetError;
+      break;
+    }
     const lsof = await runCommand(
       ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", String(proc.pid)],
-      SUBPROCESS_TIMEOUT_MS,
+      Math.min(SUBPROCESS_TIMEOUT_MS, remainingMs()),
     );
     const lsofPorts = lsof.exitCode === 0 ? parseListeningPorts(lsof.stdout) : [];
 
@@ -1172,7 +1202,11 @@ async function collectFromLocalServer(
 
     for (const target of targets) {
       for (const scheme of target.schemes) {
-        const outcome = await queryLocalTarget(request, scheme, target.port, target.csrfToken, capturedAt);
+        if (remainingMs() <= 0) {
+          lastError = budgetError;
+          break probe;
+        }
+        const outcome = await queryLocalTarget(request, scheme, target.port, target.csrfToken, capturedAt, deadline);
         if (outcome.snapshot) {
           return {
             found: true,
@@ -1424,7 +1458,12 @@ export async function collectAntigravity(
   const arch = dependencies.arch ?? process.arch;
 
   // Tactic A: local Antigravity language_server / agy Connect-RPC.
-  const local = await collectFromLocalServer(request, runCommand, capturedAt);
+  const local = await collectFromLocalServer(
+    request,
+    runCommand,
+    capturedAt,
+    dependencies.localProbeBudgetMs ?? LOCAL_PROBE_BUDGET_MS,
+  );
   if (local.result) {
     return local.result;
   }

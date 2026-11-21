@@ -80,6 +80,7 @@ describe("Antigravity normalization helpers", () => {
     expect(normalizeAntigravityPlanType("g1-pro-tier")).toBe("pro");
     expect(normalizeAntigravityPlanType("standard-tier")).toBe("standard");
     expect(normalizeAntigravityPlanType("free-tier")).toBe("free");
+    expect(normalizeAntigravityPlanType("Google AI Plus")).toBe("plus");
     expect(normalizeAntigravityPlanType("  Custom Research Tier  ")).toBe("Custom Research Tier");
     expect(normalizeAntigravityPlanType("   ")).toBeNull();
   });
@@ -312,6 +313,72 @@ describe("Antigravity Tactic A (antigravity_local)", () => {
       });
       expect(result.snapshot.extra?.planType).toBe("pro");
     }
+  });
+  test("prefers userTier over a generic planInfo name when reporting planType", async () => {
+    const runCommand = async (argv: string[]): Promise<AntigravityCommandOutput> =>
+      argv[0] === "ps"
+        ? { exitCode: 0, stdout: "  900 /Applications/Antigravity.app/Contents/Resources/language_server_macos_arm --csrf_token t\n", stderr: "" }
+        : { exitCode: 0, stdout: "language_ 900 luis 10u IPv4 0x1 0t0 TCP 127.0.0.1:51000 (LISTEN)\n", stderr: "" };
+    const collectWithUserTier = (userTier: Record<string, string>) => {
+      const request = (async (input: Parameters<typeof globalThis.fetch>[0]) => {
+        const url = String(input);
+        if (url.endsWith("/RetrieveUserQuotaSummary")) {
+          return Response.json({
+            groups: [{ displayName: "Gemini", buckets: [{ displayName: "5h", remainingFraction: 0.5, resetTime: IN_3H }] }],
+          });
+        }
+        if (url.endsWith("/GetUserStatus")) {
+          return Response.json({
+            userStatus: { userTier, planStatus: { planInfo: { planDisplayName: "Pro" } } },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      }) as typeof globalThis.fetch;
+      return collectAntigravity({ request, runCommand, now: () => NOW });
+    };
+
+    const named = await collectWithUserTier({ id: "g1-ultra-tier", name: "Google AI Ultra" });
+    expect(named.snapshot?.extra).toMatchObject({ planType: "ultra", rawPlanName: "Google AI Ultra" });
+
+    const idOnly = await collectWithUserTier({ id: "g1-ultra-tier" });
+    expect(idOnly.snapshot?.extra).toMatchObject({ planType: "ultra", tierId: "g1-ultra-tier" });
+  });
+
+  test("bounds a hung local port by the probe budget and still reaches the OAuth fallback", async () => {
+    const runCommand = async (argv: string[]): Promise<AntigravityCommandOutput> =>
+      argv[0] === "ps"
+        ? { exitCode: 0, stdout: "  900 /Applications/Antigravity.app/Contents/Resources/language_server_macos_arm --csrf_token t\n", stderr: "" }
+        : { exitCode: 0, stdout: "language_ 900 luis 10u IPv4 0x1 0t0 TCP 127.0.0.1:51000 (LISTEN)\n", stderr: "" };
+    const request = (async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("127.0.0.1")) {
+        // Simulates a socket that accepts but never answers (e.g. a raw LSP port).
+        return new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      }
+      if (url.endsWith(":retrieveUserQuotaSummary")) {
+        return Response.json({
+          groups: [{ displayName: "Gemini", buckets: [{ displayName: "5h", remainingFraction: 0.5, resetTime: IN_3H }] }],
+        });
+      }
+      return Response.json({});
+    }) as typeof globalThis.fetch;
+
+    const started = Date.now();
+    const result = await collectAntigravity({
+      request,
+      runCommand,
+      now: () => NOW,
+      localProbeBudgetMs: 200,
+      env: {
+        ANTIGRAVITY_OAUTH_CREDENTIALS_JSON: JSON.stringify({ access_token: "tok", expiry_date: NOW + 3600_000 }),
+      },
+    });
+
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(result.status).toBe("ok");
+    expect(result.source).toBe("antigravity_api");
   });
 });
 
