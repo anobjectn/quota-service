@@ -151,6 +151,9 @@ const ROSTER: ModelOption[] = [
   { provider: "codex", tier: "light", model: "GPT-5.x low/mini tier" },
   { provider: "codex", tier: "mid", model: "GPT-5.x standard tier" },
   { provider: "codex", tier: "frontier", model: "GPT-5.x high tier" },
+  { provider: "antigravity", tier: "light", model: "Gemini 3.8 Flash" },
+  { provider: "antigravity", tier: "mid", model: "Gemini 4 Argon" },
+  { provider: "antigravity", tier: "frontier", model: "Gemini 4 Neon" },
   { provider: "warp", tier: "light", model: "Luna" },
   { provider: "warp", tier: "mid", model: "Terra" },
   { provider: "warp", tier: "frontier", model: "Sol (high)" },
@@ -218,11 +221,31 @@ function computeHeadroom(report: ProviderReport): ProviderHeadroom {
       ["5h", report.snapshot.fiveHour],
       ["weekly", report.snapshot.weekly],
     ] as const) {
-      if (!w) continue;
+      if (!w || !Number.isFinite(w.usedPercent)) continue;
       const headroom = 100 - w.usedPercent;
       if (minHeadroom === null || headroom < minHeadroom) {
         minHeadroom = headroom;
         constraint = `${label} window`;
+      }
+    }
+    // When a provider only reports per-model buckets (e.g. Antigravity
+    // per-model fallback when cadence cannot be mapped to 5h/weekly),
+    // compute headroom from modelWindows rather than returning null.
+    if (minHeadroom === null && report.snapshot.modelWindows) {
+      const entries = Object.entries(report.snapshot.modelWindows).filter(
+        ([, w]) => w != null && Number.isFinite(w.usedPercent),
+      );
+      const preferred =
+        report.provider === "antigravity"
+          ? entries.filter(([name]) => /gemini/i.test(name))
+          : entries;
+      const sourceEntries = preferred.length > 0 ? preferred : entries;
+      for (const [name, w] of sourceEntries) {
+        const headroom = 100 - w.usedPercent;
+        if (minHeadroom === null || headroom < minHeadroom) {
+          minHeadroom = headroom;
+          constraint = /window$/i.test(name) ? name : `${name} window`;
+        }
       }
     }
   } else if (report.snapshot.kind === "pool") {

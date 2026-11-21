@@ -172,6 +172,68 @@ describe("normalized quota history", () => {
     db.close();
   });
 
+  test("records Antigravity provider plan provenance and falls back to configured plan_tier", () => {
+    const db = testDb();
+    saveSnapshot(db, {
+      provider: "antigravity",
+      status: "ok",
+      source: "antigravity_local",
+      dataAsOf: 1_000,
+      capturedAt: 1_000,
+      snapshot: {
+        kind: "window",
+        fiveHour: { usedPercent: 22.5, resetsAt: 1_789_000_000_000 },
+        weekly: { usedPercent: 10, resetsAt: 1_789_400_000_000 },
+        extra: {},
+      },
+    });
+    saveSnapshot(db, {
+      provider: "antigravity",
+      status: "ok",
+      source: "antigravity_api",
+      dataAsOf: 3_000,
+      capturedAt: 3_000,
+      snapshot: {
+        kind: "window",
+        fiveHour: { usedPercent: 35, resetsAt: 1_789_000_000_000 },
+        weekly: { usedPercent: 15, resetsAt: 1_789_400_000_000 },
+        extra: { planType: "ultra" },
+      },
+    });
+    setPlanAssignment(
+      db,
+      { provider: "antigravity", planId: "pro", planLabel: "Google AI Pro", effectiveFrom: 500 },
+      600,
+    );
+
+    const history = buildHistoryResponse(
+      db,
+      params({ provider: "antigravity", from: "0", to: "5000" }),
+      ["antigravity"],
+    );
+    expect(history.observations).toHaveLength(2);
+    expect(history.observations[0]).toMatchObject({
+      provider: "antigravity",
+      source: "antigravity_local",
+      timeSource: "provider",
+      plan: { id: "pro", label: "Google AI Pro", source: "configured", effectiveFrom: 500 },
+      quota: {
+        kind: "windows",
+        windows: [
+          { id: "fiveHour", usedPercent: 22.5 },
+          { id: "weekly", usedPercent: 10 },
+        ],
+      },
+    });
+    expect(history.observations[1]).toMatchObject({
+      provider: "antigravity",
+      source: "antigravity_api",
+      timeSource: "provider",
+      plan: { id: "ultra", label: "ultra", source: "provider", effectiveFrom: null },
+    });
+    db.close();
+  });
+
   test("validates the bounded request", () => {
     const db = testDb();
     expect(() => buildHistoryResponse(db, params({ provider: "codex", from: "0", to: String(32 * 86_400_000) }), ["codex"]))

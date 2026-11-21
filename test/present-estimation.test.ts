@@ -70,12 +70,23 @@ function snapshot(provider: Provider): CollectorResult {
 
 test("usage and resets include enabled providers in configured order", () => {
   const db = testDb();
-  for (const provider of ["codex", "anthropic", "warp"] as Provider[]) saveSnapshot(db, snapshot(provider));
+  for (const provider of ["codex", "anthropic", "warp", "antigravity"] as Provider[]) {
+    saveSnapshot(db, snapshot(provider));
+  }
 
-  expect(buildUsageReport(db, ["warp", "codex"]).providers.map((report) => report.provider)).toEqual(["warp", "codex"]);
-  const resets = buildResetsReport(db, ["warp", "codex"]);
+  expect(buildUsageReport(db, ["antigravity", "warp", "codex"]).providers.map((report) => report.provider)).toEqual([
+    "antigravity",
+    "warp",
+    "codex",
+  ]);
+  const resets = buildResetsReport(db, ["antigravity", "warp", "codex"]);
   expect(resets.pools.map((pool) => pool.provider)).toEqual(["warp"]);
-  expect(resets.windows.map((window) => window.provider)).toEqual(["codex", "codex"]);
+  expect(resets.windows.map((window) => window.provider)).toEqual([
+    "antigravity",
+    "antigravity",
+    "codex",
+    "codex",
+  ]);
   db.close();
 });
 
@@ -159,12 +170,80 @@ function providerReport(provider: Provider): ProviderReport {
 }
 
 test("recommendation handles every single-provider configuration", () => {
-  for (const provider of ["codex", "anthropic", "warp"] as Provider[]) {
+  for (const provider of ["codex", "anthropic", "warp", "antigravity"] as Provider[]) {
     const usage: UsageReport = { generatedAt: Date.now(), providers: [providerReport(provider)] };
     const result = recommendModel("large_refactor", usage);
     expect(result.recommendation?.provider).toBe(provider);
     expect(result.alternates.every((candidate) => candidate.provider === provider)).toBeTrue();
   }
+});
+
+test("recommendation computes Antigravity headroom from modelWindows when fiveHour/weekly are absent", () => {
+  const now = Date.now();
+  const report: ProviderReport = {
+    provider: "antigravity",
+    status: "ok",
+    source: "antigravity_local",
+    dataAgeMs: 1_000,
+    capturedAt: now,
+    snapshot: {
+      kind: "window",
+      fiveHour: null,
+      weekly: null,
+      modelWindows: {
+        "Gemini 4 Argon": { usedPercent: 35, resetsAt: now + 18 * 3_600_000 },
+        "Claude Sonnet 4.5": { usedPercent: 90, resetsAt: now + 3_600_000 },
+      },
+      extra: { planType: "ultra" },
+    },
+    manualEntries: [],
+  };
+
+  const light = recommendModel("small_fix", { generatedAt: now, providers: [report] });
+  const mid = recommendModel("feature", { generatedAt: now, providers: [report] });
+  const frontier = recommendModel("large_refactor", { generatedAt: now, providers: [report] });
+
+  expect(light.recommendation?.model).toBe("Gemini 3.8 Flash");
+  expect(mid.recommendation?.model).toBe("Gemini 4 Argon");
+  expect(frontier.recommendation?.model).toBe("Gemini 4 Neon");
+  expect(mid.recommendation?.headroomPercent).toBe(65);
+  expect(mid.recommendation?.constraint).toBe("Gemini 4 Argon window");
+});
+
+test("usage serves last-known Antigravity snapshot as stale when newest attempt fails", () => {
+  const db = testDb();
+  const now = Date.now();
+  const goodAt = now - 5 * 60_000;
+  saveSnapshot(db, {
+    provider: "antigravity",
+    status: "ok",
+    source: "antigravity_local",
+    dataAsOf: goodAt,
+    capturedAt: goodAt,
+    snapshot: {
+      kind: "window",
+      fiveHour: { usedPercent: 15, resetsAt: now + 3_600_000 },
+      weekly: { usedPercent: 40, resetsAt: now + 5 * 86_400_000 },
+      extra: { planType: "pro" },
+    },
+  });
+  saveSnapshot(db, {
+    provider: "antigravity",
+    status: "stale",
+    source: "antigravity_api",
+    dataAsOf: null,
+    capturedAt: now - 10_000,
+    snapshot: null,
+    error: "Antigravity OAuth access token expired",
+  });
+
+  const report = buildUsageReport(db, ["antigravity"]).providers[0]!;
+  expect(report.status).toBe("stale");
+  expect(report.servingLastGood).toBe(true);
+  expect(report.capturedAt).toBe(goodAt);
+  expect(report.error).toContain("expired");
+  expect(report.snapshot?.kind === "window" && report.snapshot.fiveHour?.usedPercent).toBe(15);
+  db.close();
 });
 
 test("recommendation returns no candidate instead of throwing for an empty report", () => {

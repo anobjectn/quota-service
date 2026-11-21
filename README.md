@@ -5,11 +5,11 @@
 ![Local-first](https://img.shields.io/badge/architecture-local--first-2d9d78)
 ![Read-only provider collection](https://img.shields.io/badge/provider%20collection-read--only-3b82f6)
 
-A local-first, read-only usage and quota tracker for Codex, Claude Code, and optional Warp usage. Use it from the command line for a current quota report, or connect its MCP server to an agent that needs live quota context. The browser dashboard is an optional, bare-bones interface.
+A local-first, read-only usage and quota tracker for Codex, Claude Code, and optional Warp and Google Antigravity usage. Use it from the command line for a current quota report, or connect its MCP server to an agent that needs live quota context. The browser dashboard is an optional, bare-bones interface.
 
 ## What it provides
 
-- Live quota collection for Codex and Anthropic; optional local Warp credit collection.
+- Live quota collection for Codex and Anthropic; optional Warp and Google Antigravity (`antigravity`) quota collection.
 - A CLI for usage, reset windows, cost estimates, and model recommendations.
 - An MCP server exposing the same live usage, reset, estimation, and recommendation context to agents.
 - A compact credit ledger and expandable Sources / Provenance view that keeps
@@ -38,10 +38,10 @@ cp .env.example .env
 bun run quota
 ```
 
-The default providers are `codex,anthropic`. To include Warp, edit `.env`:
+The default providers are `codex,anthropic`. To include Warp and/or Antigravity, edit `.env`:
 
 ```dotenv
-QUOTA_PROVIDERS=codex,anthropic,warp
+QUOTA_PROVIDERS=codex,anthropic,warp,antigravity
 QUOTA_PORT=8787
 QUOTA_RETENTION_DAYS=forever
 ```
@@ -86,11 +86,11 @@ snapshot row ID. Follow `nextCursor` until it is null. The cursor pins that
 version so new inserts do not reorder an in-progress read. `limit` may be at
 most 5,000.
 
-`POST /manual` accepts `field: "plan_tier"` for effective-dated Claude or
-Warp tier assignments. `effectiveFrom` is epoch milliseconds and defaults to
+`POST /manual` accepts `field: "plan_tier"` for effective-dated Claude,
+Warp, or Antigravity tier assignments. `effectiveFrom` is epoch milliseconds and defaults to
 the write time. Assignments are append-only and finite retention never prunes
-them. The Anthropic collector records the OAuth profile's specific `planType`
-when available, including `max_5x` and `max_20x`. That provider value takes
+them. The Anthropic and Antigravity collectors record provider-reported `planType`
+when available (for example `max_5x`/`max_20x` or `pro`/`ultra`). That provider value takes
 precedence. Assignments backfill observations that have no specific plan or
 only the generic credential value `max`.
 
@@ -262,7 +262,7 @@ bun run serve
 
 The repository ignores `.env`, `data/`, and SQLite database files. Collected snapshots are stored locally in `~/.quota-service/quota.db` by default. Provider credentials are read from existing local Codex and macOS Keychain sources and are not persisted by this service.
 
-Each provider assumes a single signed-in account: Codex credentials come from `~/.codex/auth.json`, and Anthropic credentials come from the macOS Keychain item Claude Code writes. If you use more than one account on the same provider, quota-service reports whichever one is currently signed in on this machine — it does not track multiple accounts per provider separately.
+Each provider assumes a single signed-in account: Codex credentials come from `~/.codex/auth.json`, Anthropic credentials come from the macOS Keychain item Claude Code writes, and Antigravity reads either the running local Antigravity `language_server`/`agy` Connect-RPC server over loopback (`127.0.0.1`) or read-only Cloud Code OAuth credentials from `ANTIGRAVITY_OAUTH_CREDENTIALS_JSON`, `QUOTA_ANTIGRAVITY_AUTH_PATH`, `~/.gemini/antigravity-cli/antigravity-oauth-token`, `~/.gemini/oauth_creds.json`, or `~/.codexbar/antigravity/oauth_creds.json` (never refreshing or writing tokens on disk). If you use more than one account on the same provider, quota-service reports whichever one is currently signed in on this machine — it does not track multiple accounts per provider separately.
 
 ## Pair with AI Usage Observatory
 

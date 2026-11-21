@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { anthropicPollFloorMs, collectAll, type CollectorRunners } from "../src/collect";
+import {
+  anthropicPollFloorMs,
+  collectAll,
+  collectAntigravityAndSave,
+  POLL_FLOORS_MS,
+  type CollectorRunners,
+} from "../src/collect";
 import { saveSnapshot } from "../src/db";
 import type { CollectorResult, Provider } from "../src/types";
 
@@ -25,12 +31,13 @@ test("collectAll invokes only enabled collectors and preserves configured orderi
     codex: runner("codex"),
     anthropic: runner("anthropic"),
     warp: runner("warp"),
+    antigravity: runner("antigravity"),
   };
 
-  const collected = await collectAll({} as Database, {}, ["warp", "codex"], runners);
+  const collected = await collectAll({} as Database, {}, ["warp", "antigravity", "codex"], runners);
 
-  expect(calls).toEqual(["warp", "codex"]);
-  expect(Object.keys(collected)).toEqual(["warp", "codex"]);
+  expect(calls).toEqual(["warp", "antigravity", "codex"]);
+  expect(Object.keys(collected)).toEqual(["warp", "antigravity", "codex"]);
   expect(collected.anthropic).toBeUndefined();
 });
 
@@ -64,6 +71,7 @@ test("concurrent polls share one provider result and persist it once", async () 
     codex,
     anthropic: async () => result("anthropic"),
     warp: async () => result("warp"),
+    antigravity: async () => result("antigravity"),
   };
 
   const first = collectAll(db, {}, ["codex"], runners);
@@ -108,5 +116,40 @@ test("consecutive Anthropic rate limits back the poll floor off to a ceiling", (
   expect(anthropicPollFloorMs(db)).toBe(20 * 60_000);
   save("The operation timed out.");
   expect(anthropicPollFloorMs(db)).toBe(180_000);
+  db.close();
+});
+
+test("collectAntigravityAndSave honors the 60s poll floor when cached data is fresh", async () => {
+  expect(POLL_FLOORS_MS.antigravity).toBe(60_000);
+  const db = new Database(":memory:");
+  db.exec(`
+    CREATE TABLE snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL,
+      status TEXT NOT NULL,
+      source TEXT NOT NULL,
+      data_as_of INTEGER,
+      captured_at INTEGER NOT NULL,
+      snapshot_json TEXT,
+      error TEXT
+    )
+  `);
+  const cached: CollectorResult = {
+    provider: "antigravity",
+    status: "ok",
+    source: "antigravity_local",
+    dataAsOf: Date.now(),
+    capturedAt: Date.now(),
+    snapshot: {
+      kind: "window",
+      fiveHour: { usedPercent: 12.5, resetsAt: Date.now() + 3_600_000 },
+      weekly: { usedPercent: 30, resetsAt: Date.now() + 5 * 86_400_000 },
+      extra: { planType: "ultra" },
+    },
+  };
+  saveSnapshot(db, cached);
+
+  const returned = await collectAntigravityAndSave(db);
+  expect(returned).toEqual(cached);
   db.close();
 });

@@ -11,7 +11,7 @@
 
 export type CollectorStatus = "ok" | "stale" | "unavailable";
 
-export type Provider = "codex" | "anthropic" | "warp";
+export type Provider = "codex" | "anthropic" | "warp" | "antigravity";
 
 export interface WindowQuota {
   /** Percentage of the window consumed, on a 0–100 scale (NOT a 0–1 fraction).
@@ -148,7 +148,7 @@ export type QuotaSnapshot = WindowSnapshot | PoolSnapshot;
 export interface CollectorResult {
   provider: Provider;
   status: CollectorStatus;
-  /** which tactic produced this result, e.g. "codex_file", "codex_api", "anthropic_api", "warp_plist" */
+  /** which tactic produced this result, e.g. "codex_file", "codex_api", "anthropic_api", "warp_plist", "antigravity_local", "antigravity_api" */
   source: string;
   /** unix ms epoch marking how old the underlying data is (event timestamp, file mtime, or fetch time for a live call) */
   dataAsOf: number | null;

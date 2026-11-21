@@ -23,12 +23,12 @@ know whether what you're looking at is current.
 ## Provider selection
 
 `QUOTA_PROVIDERS` is an ordered, comma-separated list containing `codex`,
-`anthropic`, and/or `warp`. When it is unset, the service enables
-`codex,anthropic`; Warp is supported but opt-in. Copy `.env.example` to `.env`
-and add `warp` when this machine should collect it:
+`anthropic`, `warp`, and/or `antigravity`. When it is unset, the service enables
+`codex,anthropic`; Warp and Antigravity are supported and opt-in. Copy `.env.example` to `.env`
+and add `warp` or `antigravity` when this machine should collect them:
 
 ```dotenv
-QUOTA_PROVIDERS=codex,anthropic,warp
+QUOTA_PROVIDERS=codex,anthropic,antigravity
 QUOTA_PORT=8787
 ```
 
@@ -138,6 +138,7 @@ this file only accumulates what the collectors observed.
 | Codex reset credits | GET `.../wham/rate-limit-reset-credits` — **report only**, this service never calls the `/consume` endpoint | same as above | same as above |
 | Anthropic | GET `api.anthropic.com/api/oauth/usage` with required `anthropic-beta: oauth-2025-04-20` and `User-Agent: claude-code/<version>` headers | in-memory only | macOS Keychain item **"Claude Code-credentials"**, re-read fresh every poll via `security find-generic-password`, never persisted |
 | Warp | `defaults read dev.warp.Warp-Stable AIRequestLimitInfo` (Warp stores this key as a JSON string, so it parses directly) | plist mtime as data-age signal | none — no credentials involved |
+| Antigravity | Tactic A (`antigravity_local`): detects local Antigravity `language_server`/`agy` via `ps` + `lsof` and calls read-only Connect-RPC (`RetrieveUserQuotaSummary`, `GetUserStatus`, `GetCommandModelConfigs`) over `127.0.0.1`. Tactic B (`antigravity_api`): read-only Cloud Code OAuth (`loadCodeAssist` -> `retrieveUserQuotaSummary`, fallback `fetchAvailableModels` / `retrieveUserQuota`) | in-memory only (60s poll floor) | Local CSRF token from process args (or tokenless `agy`), or read-only OAuth credentials from `ANTIGRAVITY_OAUTH_CREDENTIALS_JSON`, `QUOTA_ANTIGRAVITY_AUTH_PATH`, `~/.gemini/antigravity-cli/antigravity-oauth-token`, `~/.gemini/oauth_creds.json`, or `~/.codexbar/antigravity/oauth_creds.json`; never writes/refreshes tokens or calls `onboardUser` |
 
 ### Codex freshness upgrade, concretely
 
@@ -291,7 +292,7 @@ the root cause above:**
 **The stale-status rule.** Independent of what the last collector run
 reported, a provider whose collector hasn't actually *run* in over 3x its
 poll floor (`POLL_FLOORS_MS` in `src/collect.ts`: Codex 60s, Anthropic 180s,
-Warp 60s) is presented as `"stale"` in `src/present.ts`, with an explanatory
+Warp 60s, Antigravity 60s) is presented as `"stale"` in `src/present.ts`, with an explanatory
 note. This is keyed off **when the collector last ran** (`capturedAt`), not
 the age of the underlying data (`dataAsOf`) — those two diverge for a tactic
 like Warp's plist read, where `dataAsOf` tracks Warp's own last-usage

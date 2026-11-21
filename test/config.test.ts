@@ -13,14 +13,20 @@ describe("provider configuration", () => {
   });
 
   test("trims entries and preserves ordering", () => {
-    expect(parseEnabledProviders(" warp, codex ,anthropic ")).toEqual(["warp", "codex", "anthropic"]);
+    expect(parseEnabledProviders(" warp, antigravity, codex ,anthropic ")).toEqual([
+      "warp",
+      "antigravity",
+      "codex",
+      "anthropic",
+    ]);
   });
 
   test.each([
     ["", "non-empty"],
     ["codex,", "empty provider"],
     ["codex,codex", "duplicate provider"],
-    ["codex,other", "unknown provider"],
+    ["antigravity,antigravity", "duplicate provider"],
+    ["codex,other", "antigravity"],
   ])("rejects invalid value %p", (raw, expectedMessage) => {
     expect(() => parseEnabledProviders(raw)).toThrow(expectedMessage);
   });
@@ -28,7 +34,9 @@ describe("provider configuration", () => {
   test("distinguishes unknown and disabled manual-entry providers", () => {
     expect(() => requireEnabledProvider("other", ["codex"])).toThrow('unknown provider "other"');
     expect(() => requireEnabledProvider("warp", ["codex"])).toThrow('provider "warp" is disabled');
+    expect(() => requireEnabledProvider("antigravity", ["codex"])).toThrow('provider "antigravity" is disabled');
     expect(requireEnabledProvider("codex", ["codex"])).toBe("codex");
+    expect(requireEnabledProvider("antigravity", ["codex", "antigravity"])).toBe("antigravity");
   });
 
   test("status exposes enabled providers in configured order", () => {
