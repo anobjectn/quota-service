@@ -139,6 +139,7 @@ interface ModelOption {
   provider: Provider;
   tier: ModelTier;
   model: string;
+  modelIds?: readonly string[];
 }
 
 /** Model roster per the handoff's instructions. Names are the harness-facing
@@ -151,9 +152,9 @@ const ROSTER: ModelOption[] = [
   { provider: "codex", tier: "light", model: "GPT-5.x low/mini tier" },
   { provider: "codex", tier: "mid", model: "GPT-5.x standard tier" },
   { provider: "codex", tier: "frontier", model: "GPT-5.x high tier" },
-  { provider: "antigravity", tier: "light", model: "Gemini 3.8 Flash" },
-  { provider: "antigravity", tier: "mid", model: "Gemini 4 Argon" },
-  { provider: "antigravity", tier: "frontier", model: "Gemini 4 Neon" },
+  { provider: "antigravity", tier: "light", model: "Gemini 3.8 Flash", modelIds: ["gemini-3.8-flash"] },
+  { provider: "antigravity", tier: "mid", model: "Gemini 4 Argon", modelIds: ["gemini-4-argon"] },
+  { provider: "antigravity", tier: "frontier", model: "Gemini 4 Neon", modelIds: ["gemini-4-neon"] },
   { provider: "warp", tier: "light", model: "Luna" },
   { provider: "warp", tier: "mid", model: "Terra" },
   { provider: "warp", tier: "frontier", model: "Sol (high)" },
@@ -199,38 +200,15 @@ function computeAnthropicFrontierHeadroom(report: ProviderReport): ProviderHeadr
   return { ...base, headroomPercent: minHeadroom, constraint };
 }
 
-function normalizeModelMatchKey(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/\([^)]*\)/g, " ")
-    .replace(/[-_\s]+/g, " ")
-    .trim();
-}
-
-/** For Antigravity candidates, the binding constraint is the MINIMUM headroom
- * across any shared limits (`fiveHour`, `weekly`) AND any `modelWindows` entry
- * targeting that specific candidate model (e.g. `Gemini 4 Argon` or
- * `Gemini 4 Argon (5h)`). If neither shared windows nor a model-specific match
- * exist, fall back to Gemini `modelWindows` (or all `modelWindows`) so
- * per-model-only snapshots remain rankable without overstating an exhausted model. */
-function computeAntigravityCandidateHeadroom(
-  report: ProviderReport,
-  modelName: string,
-): ProviderHeadroom {
-  const base = computeHeadroom(report);
-  if (report.status === "unavailable" || !report.snapshot || report.snapshot.kind !== "window") {
-    return base;
-  }
-  const modelWindows = report.snapshot.modelWindows;
-  const validEntries = modelWindows
-    ? Object.entries(modelWindows).filter(([, w]) => w != null && Number.isFinite(w.usedPercent))
-    : [];
-
+function minPrimaryWindowHeadroom(
+  fiveHour: { usedPercent: number } | null,
+  weekly: { usedPercent: number } | null,
+): { headroomPercent: number | null; constraint: string | null } {
   let minHeadroom: number | null = null;
   let constraint: string | null = null;
   for (const [label, w] of [
-    ["5h", report.snapshot.fiveHour],
-    ["weekly", report.snapshot.weekly],
+    ["5h", fiveHour],
+    ["weekly", weekly],
   ] as const) {
     if (!w || !Number.isFinite(w.usedPercent)) continue;
     const headroom = 100 - w.usedPercent;
@@ -239,28 +217,78 @@ function computeAntigravityCandidateHeadroom(
       constraint = `${label} window`;
     }
   }
+  return { headroomPercent: minHeadroom, constraint };
+}
 
-  const targetKey = normalizeModelMatchKey(modelName);
-  const matchingEntries = validEntries.filter(([name]) => {
-    const key = normalizeModelMatchKey(name);
-    return key === targetKey || key.startsWith(`${targetKey} `);
-  });
+function normalizeModelMatchKey(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/[-_\s]+/g, " ")
+    .trim();
+}
 
-  const entriesToApply =
-    matchingEntries.length > 0
-      ? matchingEntries
-      : minHeadroom === null
-        ? (() => {
-            const geminiEntries = validEntries.filter(([name]) => /gemini/i.test(name));
-            return geminiEntries.length > 0 ? geminiEntries : validEntries;
-          })()
-        : [];
+function normalizeCanonicalModelId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^models\//, "")
+    .replace(/[_\s]+/g, "-")
+    .replace(/(?:-(?:low|medium|med|high|xhigh|thinking|tiered|preview|latest))+$/g, "");
+}
 
-  for (const [name, w] of entriesToApply) {
-    const headroom = 100 - w.usedPercent;
-    if (minHeadroom === null || headroom < minHeadroom) {
-      minHeadroom = headroom;
-      constraint = /window$/i.test(name) ? name : `${name} window`;
+function extractModelWindowIds(extra: Record<string, unknown> | undefined): Record<string, string> {
+  const raw = extra?.modelWindowIds;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [label, id] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof id === "string" && id.trim()) {
+      out[label] = id.trim();
+    }
+  }
+  return out;
+}
+
+/** For Antigravity candidates, the binding constraint is the MINIMUM headroom
+ * across any shared limits (`fiveHour`, `weekly`) AND any `modelWindows` entry
+ * targeting that specific candidate model — matched by exact normalized label
+ * (ignoring parenthetical cadence/duration tags like `(5h)`/`(weekly)`/`(1h)`)
+ * or by canonical model ID in `snapshot.extra.modelWindowIds`. Unrelated models'
+ * buckets are never borrowed: if neither shared limits nor a matching model
+ * window exist for a candidate, its headroom is `null` (unknown) so ranking
+ * falls back honestly to a measured tier. */
+function computeAntigravityCandidateHeadroom(
+  report: ProviderReport,
+  option: ModelOption,
+): ProviderHeadroom {
+  const base = computeHeadroom(report);
+  if (report.status === "unavailable" || !report.snapshot || report.snapshot.kind !== "window") {
+    return base;
+  }
+
+  let { headroomPercent: minHeadroom, constraint } = minPrimaryWindowHeadroom(
+    report.snapshot.fiveHour,
+    report.snapshot.weekly,
+  );
+
+  const modelWindows = report.snapshot.modelWindows;
+  if (modelWindows) {
+    const targetKey = normalizeModelMatchKey(option.model);
+    const targetIds = new Set((option.modelIds ?? []).map(normalizeCanonicalModelId));
+    const windowIds = extractModelWindowIds(report.snapshot.extra);
+
+    for (const [name, w] of Object.entries(modelWindows)) {
+      if (!w || !Number.isFinite(w.usedPercent)) continue;
+      const labelMatches = normalizeModelMatchKey(name) === targetKey;
+      const recordedId = windowIds[name];
+      const idMatches = recordedId != null && targetIds.has(normalizeCanonicalModelId(recordedId));
+      if (!labelMatches && !idMatches) continue;
+
+      const headroom = 100 - w.usedPercent;
+      if (minHeadroom === null || headroom < minHeadroom) {
+        minHeadroom = headroom;
+        constraint = /window$/i.test(name) ? name : `${name} window`;
+      }
     }
   }
 
@@ -285,20 +313,13 @@ function computeHeadroom(report: ProviderReport): ProviderHeadroom {
   let minHeadroom: number | null = null;
   let constraint: string | null = null;
   if (report.snapshot.kind === "window") {
-    for (const [label, w] of [
-      ["5h", report.snapshot.fiveHour],
-      ["weekly", report.snapshot.weekly],
-    ] as const) {
-      if (!w || !Number.isFinite(w.usedPercent)) continue;
-      const headroom = 100 - w.usedPercent;
-      if (minHeadroom === null || headroom < minHeadroom) {
-        minHeadroom = headroom;
-        constraint = `${label} window`;
-      }
-    }
+    ({ headroomPercent: minHeadroom, constraint } = minPrimaryWindowHeadroom(
+      report.snapshot.fiveHour,
+      report.snapshot.weekly,
+    ));
     // When a provider only reports per-model buckets (e.g. Antigravity
     // per-model fallback when cadence cannot be mapped to 5h/weekly),
-    // compute headroom from modelWindows rather than returning null.
+    // compute provider-level headroom summary from modelWindows rather than null.
     if (minHeadroom === null && report.snapshot.modelWindows) {
       const entries = Object.entries(report.snapshot.modelWindows).filter(
         ([, w]) => w != null && Number.isFinite(w.usedPercent),
@@ -375,7 +396,7 @@ export function recommendModel(taskProfile: TaskProfile, usage: UsageReport): Re
       const h = r.provider === "anthropic" && tier === "frontier" && report
         ? computeAnthropicFrontierHeadroom(report)
         : r.provider === "antigravity" && report
-          ? computeAntigravityCandidateHeadroom(report, r.model)
+          ? computeAntigravityCandidateHeadroom(report, r)
           : headroomByProvider.find((candidate) => candidate.provider === r.provider);
       if (!h) return [];
       return {

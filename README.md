@@ -81,7 +81,10 @@ GET /history?provider=codex&from=1787875200000&to=1790553599999&limit=1000
 
 Responses retain raw counts for Warp, fractional percentages, observed and
 collection timestamps, plan provenance, the earliest available observation,
-and the active retention policy. `historyVersion` is the provider's maximum
+and the active retention policy. For `antigravity`, `GET /history` and
+`GET /resets` also emit per-model buckets using `model:<name>` window IDs
+(and model-only fallback observations may contain only `model:<name>` entries
+with no `fiveHour` or `weekly` window). `historyVersion` is the provider's maximum
 snapshot row ID. Follow `nextCursor` until it is null. The cursor pins that
 version so new inserts do not reorder an in-progress read. `limit` may be at
 most 5,000.

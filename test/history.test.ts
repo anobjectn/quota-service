@@ -261,6 +261,32 @@ describe("normalized quota history", () => {
         ],
       },
     });
+
+    // Anthropic history continues emitting only fiveHour/weekly (no breaking model:<name> change).
+    saveSnapshot(db, {
+      provider: "anthropic",
+      status: "ok",
+      source: "anthropic_api",
+      dataAsOf: 2_000,
+      capturedAt: 2_000,
+      snapshot: {
+        kind: "window",
+        fiveHour: { usedPercent: 15, resetsAt: reset5h },
+        weekly: { usedPercent: 25, resetsAt: resetWeekly },
+        modelWindows: { Fable: { usedPercent: 5, resetsAt: resetWeekly } },
+      },
+    });
+    const anthropicHistory = buildHistoryResponse(
+      db,
+      params({ provider: "anthropic", from: "0", to: "5000" }),
+      ["anthropic"],
+    );
+    expect(anthropicHistory.observations).toHaveLength(1);
+    const anthQuota = anthropicHistory.observations[0]!.quota;
+    expect(anthQuota.kind).toBe("windows");
+    if (anthQuota.kind === "windows") {
+      expect(anthQuota.windows.map((w) => w.id)).toEqual(["fiveHour", "weekly"]);
+    }
     db.close();
   });
 

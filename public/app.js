@@ -272,6 +272,53 @@ function renderAnthropicImportForm(web) {
   </form>`;
 }
 
+function provenanceSpec(p, extra) {
+  if (p.provider === "anthropic") {
+    return {
+      sourceTitle: "Provider quota API",
+      sourceCount: 3,
+      liveDescription: "Server-authoritative five-hour, weekly, scoped-limit, and monthly-spend data. The Claude Code OAuth token can read this endpoint.",
+      liveEndpoint: "api.anthropic.com/api/oauth/usage",
+    };
+  }
+  if (p.provider === "warp") {
+    return {
+      sourceTitle: "Provider quota API",
+      sourceCount: 2,
+      liveDescription: "Local Warp preference data. It reports the plan pool and allowances but not purchased add-on balances.",
+      liveEndpoint: "Warp AIRequestLimitInfo plist",
+    };
+  }
+  if (p.provider === "antigravity") {
+    const bySource = {
+      antigravity_local: {
+        sourceTitle: "Local Antigravity server",
+        liveDescription: "Read-only local Antigravity language server Connect-RPC quota summary and model status over loopback (127.0.0.1 / [::1]).",
+        liveEndpoint: `${extra.loopbackHost ?? "127.0.0.1"} — LanguageServerService/${extra.endpoint ?? "RetrieveUserQuotaSummary"}`,
+      },
+      antigravity_api: {
+        sourceTitle: "Cloud Code OAuth API",
+        liveDescription: "Read-only Google Cloud Code OAuth quota endpoints using existing local credentials. Never refreshes tokens, calls onboardUser, or consumes credits.",
+        liveEndpoint: extra.endpoint && extra.endpoint !== "retrieveUserQuotaSummary"
+          ? `cloudcode-pa.googleapis.com/v1internal:${extra.endpoint}`
+          : "daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+      },
+    };
+    const chosen = bySource[p.source] ?? {
+      sourceTitle: "Antigravity quota source",
+      liveDescription: "Read-only local Antigravity language server with fallback to Google Cloud Code OAuth quota endpoints. Never refreshes tokens or consumes credits.",
+      liveEndpoint: "127.0.0.1 / [::1] (local) or cloudcode-pa.googleapis.com (OAuth fallback)",
+    };
+    return { ...chosen, sourceCount: 1 };
+  }
+  return {
+    sourceTitle: "Provider quota API",
+    sourceCount: 2,
+    liveDescription: "Server-authoritative usage windows and banked-reset metadata, with local session data used only as a fallback.",
+    liveEndpoint: "chatgpt.com/backend-api/wham/usage",
+  };
+}
+
 function renderProvenance(p) {
   const extra = p.snapshot?.extra ?? {};
   const captured = p.capturedAt == null ? "unknown" : fmtAge(Date.now() - p.capturedAt);
@@ -279,38 +326,7 @@ function renderProvenance(p) {
   const isWarp = p.provider === "warp";
   const isAntigravity = p.provider === "antigravity";
   const rawLimits = isAnthropic && Array.isArray(extra.rawLimits) ? extra.rawLimits : null;
-  const liveDescription = isAnthropic
-    ? "Server-authoritative five-hour, weekly, scoped-limit, and monthly-spend data. The Claude Code OAuth token can read this endpoint."
-    : isWarp
-      ? "Local Warp preference data. It reports the plan pool and allowances but not purchased add-on balances."
-      : isAntigravity
-        ? p.source === "antigravity_local"
-          ? "Read-only local Antigravity language server Connect-RPC quota summary and model status over loopback (127.0.0.1 / [::1])."
-          : p.source === "antigravity_api"
-            ? "Read-only Google Cloud Code OAuth quota endpoints using existing local credentials. Never refreshes tokens, calls onboardUser, or consumes credits."
-            : "Read-only local Antigravity language server with fallback to Google Cloud Code OAuth quota endpoints. Never refreshes tokens or consumes credits."
-        : "Server-authoritative usage windows and banked-reset metadata, with local session data used only as a fallback.";
-  const liveEndpoint = isAnthropic
-    ? "api.anthropic.com/api/oauth/usage"
-    : isWarp
-      ? "Warp AIRequestLimitInfo plist"
-      : isAntigravity
-        ? p.source === "antigravity_local"
-          ? `${extra.loopbackHost ?? "127.0.0.1"} — LanguageServerService/${extra.endpoint ?? "RetrieveUserQuotaSummary"}`
-          : p.source === "antigravity_api"
-            ? extra.endpoint && extra.endpoint !== "retrieveUserQuotaSummary"
-              ? `cloudcode-pa.googleapis.com/v1internal:${extra.endpoint}`
-              : "daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-            : "127.0.0.1 / [::1] (local) or cloudcode-pa.googleapis.com (OAuth fallback)"
-        : "chatgpt.com/backend-api/wham/usage";
-  const sourceCount = isAnthropic ? 3 : isAntigravity ? 1 : 2;
-  const sourceTitle = isAntigravity
-    ? p.source === "antigravity_local"
-      ? "Local Antigravity server"
-      : p.source === "antigravity_api"
-        ? "Cloud Code OAuth API"
-        : "Antigravity quota source"
-    : "Provider quota API";
+  const { sourceTitle, sourceCount, liveDescription, liveEndpoint } = provenanceSpec(p, extra);
 
   return `<details class="provenance">
     <summary>

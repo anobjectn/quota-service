@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { saveResetCredits, saveSnapshot, setManualEntry } from "../src/db";
-import { collectAntigravity, normalizeAvailableModels } from "../src/collectors/antigravity";
+import { collectAntigravity, normalizeAvailableModels, normalizeQuotaSummary } from "../src/collectors/antigravity";
 import { recommendModel } from "../src/estimation";
 import { buildResetsReport, buildUsageReport, type ProviderReport, type UsageReport } from "../src/present";
 import type { CollectorResult, Provider } from "../src/types";
@@ -179,7 +179,7 @@ test("recommendation handles every single-provider configuration", () => {
   }
 });
 
-test("recommendation computes Antigravity headroom from modelWindows when fiveHour/weekly are absent", () => {
+test("recommendation measures only matching Antigravity modelWindows and falls back honestly for unmeasured tiers", () => {
   const now = Date.now();
   const report: ProviderReport = {
     provider: "antigravity",
@@ -192,7 +192,7 @@ test("recommendation computes Antigravity headroom from modelWindows when fiveHo
       fiveHour: null,
       weekly: null,
       modelWindows: {
-        "Gemini 4 Argon": { usedPercent: 35, resetsAt: now + 18 * 3_600_000 },
+        "Gemini 4 Argon": { usedPercent: 10, resetsAt: now + 18 * 3_600_000 },
         "Claude Sonnet 4.5": { usedPercent: 90, resetsAt: now + 3_600_000 },
       },
       extra: { planType: "ultra" },
@@ -204,11 +204,18 @@ test("recommendation computes Antigravity headroom from modelWindows when fiveHo
   const mid = recommendModel("feature", { generatedAt: now, providers: [report] });
   const frontier = recommendModel("large_refactor", { generatedAt: now, providers: [report] });
 
-  expect(light.recommendation?.model).toBe("Gemini 3.8 Flash");
+  // Only Gemini 4 Argon has a measured bucket; unmeasured tiers fall back to Argon
+  // instead of claiming Neon or Flash has Argon's headroom.
   expect(mid.recommendation?.model).toBe("Gemini 4 Argon");
-  expect(frontier.recommendation?.model).toBe("Gemini 4 Neon");
-  expect(mid.recommendation?.headroomPercent).toBe(65);
+  expect(mid.recommendation?.headroomPercent).toBe(90);
   expect(mid.recommendation?.constraint).toBe("Gemini 4 Argon window");
+
+  expect(frontier.recommendation?.model).toBe("Gemini 4 Argon");
+  expect(frontier.recommendation?.headroomPercent).toBe(90);
+  expect(frontier.warnings.some((w) => w.includes('falling back to adjacent tier "mid"'))).toBe(true);
+
+  expect(light.recommendation?.model).toBe("Gemini 4 Argon");
+  expect(light.warnings.some((w) => w.includes('falling back to adjacent tier "mid"'))).toBe(true);
 });
 
 test("recommendation treats an exhausted Antigravity modelWindow as 0% headroom even with shared headroom", () => {
@@ -236,25 +243,23 @@ test("recommendation treats an exhausted Antigravity modelWindow as 0% headroom 
   expect(result.warnings.some((w) => w.includes('falling back to adjacent tier'))).toBe(true);
 });
 
-test("recommendation never lends another Antigravity model's headroom to an exhausted candidate", () => {
+test("recommendation matches canonical model IDs when display labels differ and does not conflate sibling variant names", () => {
   const now = 1_800_000_000_000;
-  const snap = normalizeAvailableModels(
-    {
-      models: {
-        "gemini-4-argon": {
-          displayName: "Gemini 4 Argon",
-          quotaInfo: { remainingFraction: 0.9, resetTime: new Date(now + 5 * 86_400_000).toISOString() },
-        },
-        "gemini-4-neon": {
-          displayName: "Gemini 4 Neon",
-          quotaInfo: { remainingFraction: 0.0, resetTime: new Date(now + 3 * 3_600_000).toISOString() },
-        },
+  // Short displayName "Neon" still resolves to Gemini 4 Neon via modelWindowIds.
+  const snap = normalizeAvailableModels({
+    models: {
+      "gemini-4-neon": {
+        displayName: "Neon",
+        quotaInfo: { remainingFraction: 0.0, resetTime: new Date(now + 3 * 3_600_000).toISOString() },
+      },
+      "gemini-4-argon": {
+        displayName: "Gemini 4 Argon",
+        quotaInfo: { remainingFraction: 0.9, resetTime: new Date(now + 5 * 86_400_000).toISOString() },
       },
     },
-    now,
-  );
+  });
   expect(snap).not.toBeNull();
-  const result = recommendModel("large_refactor", {
+  const byId = recommendModel("large_refactor", {
     generatedAt: now,
     providers: [{
       provider: "antigravity",
@@ -266,10 +271,102 @@ test("recommendation never lends another Antigravity model's headroom to an exha
       manualEntries: [],
     }],
   });
+  expect(byId.recommendation?.model).toBe("Gemini 4 Argon");
+  expect(byId.recommendation?.headroomPercent).toBe(90);
+  expect(byId.warnings.some((w) => w.includes('falling back to adjacent tier "mid"'))).toBe(true);
 
-  expect(result.recommendation?.model).toBe("Gemini 4 Argon");
-  expect(result.recommendation?.headroomPercent).toBe(90);
-  expect(result.warnings.some((w) => w.includes('falling back to adjacent tier "mid"'))).toBe(true);
+  // Exhausted "Gemini 4 Argon Lite" must not constrain "Gemini 4 Argon".
+  const variant = recommendModel("feature", {
+    generatedAt: now,
+    providers: [{
+      provider: "antigravity",
+      status: "ok",
+      source: "antigravity_local",
+      dataAgeMs: 0,
+      capturedAt: now,
+      snapshot: {
+        kind: "window",
+        fiveHour: null,
+        weekly: null,
+        modelWindows: {
+          "Gemini 4 Argon Lite": { usedPercent: 100, resetsAt: now + 3_600_000 },
+          "Gemini 4 Argon": { usedPercent: 10, resetsAt: now + 3_600_000 },
+        },
+      },
+      manualEntries: [],
+    }],
+  });
+  expect(variant.recommendation?.model).toBe("Gemini 4 Argon");
+  expect(variant.recommendation?.headroomPercent).toBe(90);
+
+  // Non-primary 1h and "Weekly quota" buckets preserve group identity so recommendation avoids exhausted models.
+  const argonExhaustedSnap = normalizeQuotaSummary({
+    groups: [
+      { displayName: "Gemini", buckets: [{ window: "18000s", remainingFraction: 0.9 }] },
+      { displayName: "Gemini 4 Argon", buckets: [{ window: "3600s", remainingFraction: 0.0 }] },
+      { displayName: "Claude / GPT", buckets: [{ window: "3600s", remainingFraction: 0.8 }] },
+    ],
+  });
+  expect(argonExhaustedSnap).not.toBeNull();
+  const midSummary = recommendModel("feature", {
+    generatedAt: now,
+    providers: [{
+      provider: "antigravity",
+      status: "ok",
+      source: "antigravity_local",
+      dataAgeMs: 0,
+      capturedAt: now,
+      snapshot: argonExhaustedSnap,
+      manualEntries: [],
+    }],
+  });
+  expect(midSummary.recommendation?.model).toBe("Gemini 3.8 Flash");
+  expect(midSummary.recommendation?.headroomPercent).toBe(90);
+
+  const neonExhaustedSnap = normalizeQuotaSummary({
+    groups: [
+      { displayName: "Gemini", buckets: [{ displayName: "Weekly", remainingFraction: 0.9 }] },
+      { displayName: "Gemini 4 Neon", buckets: [{ displayName: "Weekly quota", remainingFraction: 0.0 }] },
+    ],
+  });
+  expect(neonExhaustedSnap).not.toBeNull();
+  const frontierSummary = recommendModel("large_refactor", {
+    generatedAt: now,
+    providers: [{
+      provider: "antigravity",
+      status: "ok",
+      source: "antigravity_local",
+      dataAgeMs: 0,
+      capturedAt: now,
+      snapshot: neonExhaustedSnap,
+      manualEntries: [],
+    }],
+  });
+  expect(frontierSummary.recommendation?.model).toBe("Gemini 4 Argon");
+  expect(frontierSummary.recommendation?.headroomPercent).toBe(90);
+});
+
+test("resets emit model:<name> windows only for Antigravity, preserving existing Anthropic output", () => {
+  const db = testDb();
+  const now = Date.now();
+  saveSnapshot(db, {
+    provider: "anthropic",
+    status: "ok",
+    source: "anthropic_api",
+    dataAsOf: now,
+    capturedAt: now,
+    snapshot: {
+      kind: "window",
+      fiveHour: { usedPercent: 15, resetsAt: now + 3_600_000 },
+      weekly: { usedPercent: 25, resetsAt: now + 86_400_000 },
+      modelWindows: {
+        Fable: { usedPercent: 5, resetsAt: now + 86_400_000 },
+      },
+    },
+  });
+  const resets = buildResetsReport(db, ["anthropic"]);
+  expect(resets.windows.map((w) => w.window)).toEqual(["fiveHour", "weekly"]);
+  db.close();
 });
 
 test("model-only Antigravity snapshot flows from collectAntigravity into usage, resets, and stale fallback", async () => {

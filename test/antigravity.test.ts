@@ -186,7 +186,6 @@ describe("Antigravity normalization helpers", () => {
           ],
         },
       },
-      NOW,
       { planType: "ultra", rawPlanName: "Google AI Ultra", tierId: "g1-ultra-tier", planSource: "get_user_status" },
     );
 
@@ -202,48 +201,45 @@ describe("Antigravity normalization helpers", () => {
   });
 
   test("classifies underscore-separated identifiers and protobuf duration strings without guessing fiveHour from short horizon", () => {
-    const snap = normalizeQuotaSummary(
-      {
-        groups: [
-          {
-            displayName: "Gemini",
-            buckets: [
-              // Underscore-only identifier and protobuf duration string ("18000s" = 5h)
-              {
-                bucketId: "gemini_5h",
-                window: { duration: "18000s" },
-                remainingFraction: 0.7,
-                resetTime: IN_3H,
-              },
-              {
-                bucketId: "gemini_weekly",
-                window: "QUOTA_WINDOW_WEEKLY",
-                remainingFraction: 0.8,
-                resetTime: IN_3H, // Even with 3h left, explicit weekly metadata wins
-              },
-              // Unlabeled bucket with <= 6h remaining must NOT be guessed as fiveHour
-              {
-                bucketId: "mystery_bucket",
-                remainingFraction: 0.5,
-                resetTime: IN_3H,
-              },
-            ],
-          },
-          {
-            displayName: "Gemini 4 Argon",
-            buckets: [
-              // Unset protobuf timestamp { seconds: 0 } yields resetsAt: null
-              {
-                bucketId: "argon_pool",
-                remainingFraction: 0.6,
-                resetTime: { seconds: 0, nanos: 0 },
-              },
-            ],
-          },
-        ],
-      },
-      NOW,
-    );
+    const snap = normalizeQuotaSummary({
+      groups: [
+        {
+          displayName: "Gemini",
+          buckets: [
+            // Underscore-only identifier and protobuf duration string ("18000s" = 5h)
+            {
+              bucketId: "gemini_5h",
+              window: { duration: "18000s" },
+              remainingFraction: 0.7,
+              resetTime: IN_3H,
+            },
+            {
+              bucketId: "gemini_weekly",
+              window: "QUOTA_WINDOW_WEEKLY",
+              remainingFraction: 0.8,
+              resetTime: IN_3H, // Even with 3h left, explicit weekly metadata wins
+            },
+            // Unlabeled bucket with <= 6h remaining must NOT be guessed as fiveHour
+            {
+              bucketId: "mystery_bucket",
+              remainingFraction: 0.5,
+              resetTime: IN_3H,
+            },
+          ],
+        },
+        {
+          displayName: "Gemini 4 Argon",
+          buckets: [
+            // Unset protobuf timestamp { seconds: 0 } yields resetsAt: null
+            {
+              bucketId: "argon_pool",
+              remainingFraction: 0.6,
+              resetTime: { seconds: 0, nanos: 0 },
+            },
+          ],
+        },
+      ],
+    });
 
     expect(snap).not.toBeNull();
     expect(snap!.fiveHour).toEqual({ usedPercent: 30, resetsAt: Date.parse(IN_3H) });
@@ -255,24 +251,21 @@ describe("Antigravity normalization helpers", () => {
   });
 
   test("never guesses fiveHour from <= 6h remaining time on an unlabeled QuotaSummary bucket", () => {
-    const snap = normalizeQuotaSummary(
-      {
-        groups: [
-          {
-            displayName: "Gemini",
-            buckets: [
-              {
-                bucketId: "primary_pool",
-                displayName: "Gemini Pro",
-                remainingFraction: 0.4,
-                resetTime: IN_3H,
-              },
-            ],
-          },
-        ],
-      },
-      NOW,
-    );
+    const snap = normalizeQuotaSummary({
+      groups: [
+        {
+          displayName: "Gemini",
+          buckets: [
+            {
+              bucketId: "primary_pool",
+              displayName: "Gemini Pro",
+              remainingFraction: 0.4,
+              resetTime: IN_3H,
+            },
+          ],
+        },
+      ],
+    });
 
     expect(snap).not.toBeNull();
     expect(snap!.fiveHour).toBeNull();
@@ -283,29 +276,26 @@ describe("Antigravity normalization helpers", () => {
   });
 
   test("keeps non-5h/non-weekly explicit durations (60s, 3600s, 20d) in modelWindows and prefers structured labels over descriptions", () => {
-    const snap = normalizeQuotaSummary(
-      {
-        groups: [
-          {
-            displayName: "Gemini",
-            buckets: [
-              { bucketId: "rpm", window: "60s", remainingFraction: 0.1, resetTime: IN_3H },
-              { window: "3600s", remainingFraction: 0.5, resetTime: IN_3H },
-              { bucketId: "gemini_5h", window: "18000s", remainingFraction: 0.8, resetTime: IN_3H },
-              {
-                bucketId: "gemini_weekly",
-                displayName: "Weekly",
-                description: "Independent of 5h session limit",
-                remainingFraction: 0.65,
-                resetTime: IN_5D,
-              },
-              { bucketId: "monthly_cap", window: "1728000s", remainingFraction: 0.9, resetTime: IN_5D },
-            ],
-          },
-        ],
-      },
-      NOW,
-    );
+    const snap = normalizeQuotaSummary({
+      groups: [
+        {
+          displayName: "Gemini",
+          buckets: [
+            { bucketId: "rpm", window: "60s", remainingFraction: 0.1, resetTime: IN_3H },
+            { window: "3600s", remainingFraction: 0.5, resetTime: IN_3H },
+            { bucketId: "gemini_5h", window: "18000s", remainingFraction: 0.8, resetTime: IN_3H },
+            {
+              bucketId: "gemini_weekly",
+              displayName: "Weekly",
+              description: "Independent of 5h session limit",
+              remainingFraction: 0.65,
+              resetTime: IN_5D,
+            },
+            { bucketId: "monthly_cap", window: "1728000s", remainingFraction: 0.9, resetTime: IN_5D },
+          ],
+        },
+      ],
+    });
 
     expect(snap).not.toBeNull();
     expect(snap!.fiveHour).toEqual({ usedPercent: 20, resetsAt: Date.parse(IN_3H) });
@@ -317,37 +307,68 @@ describe("Antigravity normalization helpers", () => {
     });
 
     // Standalone 1h bucket stays in modelWindows without populating fiveHour.
-    const oneHourOnly = normalizeQuotaSummary(
-      { groups: [{ displayName: "Gemini", buckets: [{ window: "3600s", remainingFraction: 0.5 }] }] },
-      NOW,
-    );
+    const oneHourOnly = normalizeQuotaSummary({
+      groups: [{ displayName: "Gemini", buckets: [{ window: "3600s", remainingFraction: 0.5 }] }],
+    });
     expect(oneHourOnly).not.toBeNull();
     expect(oneHourOnly!.fiveHour).toBeNull();
     expect(oneHourOnly!.modelWindows).toEqual({ "1h": { usedPercent: 50, resetsAt: null } });
 
     // Malformed non-array buckets returns null cleanly instead of throwing.
-    expect(normalizeQuotaSummary({ groups: [{ buckets: {} as unknown as [] }] }, NOW)).toBeNull();
+    expect(normalizeQuotaSummary({ groups: [{ buckets: {} as unknown as [] }] })).toBeNull();
   });
 
-  test("keeps per-model fallback horizons (2d, 4d, 20d) stably in modelWindows without jumping across cycles", () => {
+  test("never promotes a sole model-specific Gemini group to shared fiveHour/weekly and preserves group names on generic/duration buckets", () => {
+    // Sole versioned Gemini group stays in modelWindows rather than populating shared fiveHour.
+    const argonOnly = normalizeQuotaSummary({
+      groups: [{ displayName: "Gemini 4 Argon", buckets: [{ displayName: "Session", remainingFraction: 0 }] }],
+    });
+    expect(argonOnly).not.toBeNull();
+    expect(argonOnly!.fiveHour).toBeNull();
+    expect(argonOnly!.weekly).toBeNull();
+    expect(argonOnly!.modelWindows).toEqual({
+      "Gemini 4 Argon (5h)": { usedPercent: 100, resetsAt: null },
+    });
+
+    // Generic cadence phrases like "Weekly quota" and non-5h/weekly durations like "3600s"
+    // must keep their enclosing group name without collapsing across groups.
+    const multiGroup = normalizeQuotaSummary({
+      groups: [
+        { displayName: "Gemini", buckets: [{ window: "18000s", remainingFraction: 0.9 }, { displayName: "Weekly", remainingFraction: 0.9 }] },
+        { displayName: "Gemini 4 Neon", buckets: [{ displayName: "Weekly quota", remainingFraction: 0 }] },
+        { displayName: "Gemini 4 Argon", buckets: [{ window: "3600s", remainingFraction: 0 }] },
+        { displayName: "Claude / GPT", buckets: [{ window: "3600s", remainingFraction: 0.8 }] },
+      ],
+    });
+    expect(multiGroup).not.toBeNull();
+    expect(multiGroup!.fiveHour).toEqual({ usedPercent: 10, resetsAt: null });
+    expect(multiGroup!.weekly).toEqual({ usedPercent: 10, resetsAt: null });
+    expect(multiGroup!.modelWindows).toEqual({
+      "Gemini 4 Neon (weekly)": { usedPercent: 100, resetsAt: null },
+      "Gemini 4 Argon (1h)": { usedPercent: 100, resetsAt: null },
+      "Claude / GPT (1h)": { usedPercent: 20, resetsAt: null },
+    });
+  });
+
+  test("keeps per-model fallback horizons (2d, 4d, 20d) stably in modelWindows and records canonical modelWindowIds", () => {
     for (const days of [2, 4, 20]) {
       const reset = new Date(NOW + days * 24 * 3600 * 1000).toISOString();
-      const snap = normalizeAvailableModels(
-        {
-          models: {
-            "gemini-3-pro": {
-              displayName: "Gemini 3 Pro",
-              quotaInfo: { remainingFraction: 0.4, resetTime: reset },
-            },
+      const snap = normalizeAvailableModels({
+        models: {
+          "gemini-3-pro": {
+            displayName: "Gemini 3 Pro",
+            quotaInfo: { remainingFraction: 0.4, resetTime: reset },
           },
         },
-        NOW,
-      );
+      });
       expect(snap).not.toBeNull();
       expect(snap!.fiveHour).toBeNull();
       expect(snap!.weekly).toBeNull();
       expect(snap!.modelWindows).toEqual({
         "Gemini 3 Pro": { usedPercent: 60, resetsAt: Date.parse(reset) },
+      });
+      expect(snap!.extra?.modelWindowIds).toEqual({
+        "Gemini 3 Pro": "gemini-3-pro",
       });
     }
   });
@@ -641,6 +662,56 @@ describe("Antigravity Tactic A (antigravity_local)", () => {
     expect(Date.now() - started).toBeLessThan(2_000);
     expect(result.status).toBe("ok");
     expect(result.source).toBe("antigravity_api");
+  });
+
+  test("continues to GetUserStatus on the same HTTPS connection when RetrieveUserQuotaSummary returns HTTP 200 with invalid JSON", async () => {
+    const calls: string[] = [];
+    const runCommand = async (argv: string[]): Promise<AntigravityCommandOutput> =>
+      argv[0] === "ps"
+        ? { exitCode: 0, stdout: "  920 /Applications/Antigravity.app/Contents/Resources/language_server_macos_arm --csrf_token tok\n", stderr: "" }
+        : { exitCode: 0, stdout: "language_ 920 luis 10u IPv4 0x1 0t0 TCP 127.0.0.1:51222 (LISTEN)\n", stderr: "" };
+
+    const request = (async (input: Parameters<typeof globalThis.fetch>[0]) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.startsWith("http://")) {
+        throw new Error("HTTPS-only loopback server");
+      }
+      if (url.endsWith("/RetrieveUserQuotaSummary")) {
+        return new Response("not valid json", { status: 200, headers: { "Content-Type": "text/plain" } });
+      }
+      if (url.endsWith("/GetUserStatus")) {
+        return Response.json({
+          userStatus: {
+            userTier: { id: "g1-pro-tier", name: "Google AI Pro" },
+            cascadeModelConfigData: {
+              clientModelConfigs: [
+                {
+                  label: "Gemini 4 Argon",
+                  modelOrAlias: { model: "gemini-4-argon" },
+                  quotaInfo: { remainingFraction: 0.75, resetTime: IN_3H },
+                },
+              ],
+            },
+          },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof globalThis.fetch;
+
+    const result = await collectAntigravity({ request, runCommand, now: () => NOW, env: {}, readFileText: async () => null });
+    expect(result.status).toBe("ok");
+    expect(result.source).toBe("antigravity_local");
+    expect(calls).toEqual([
+      "https://127.0.0.1:51222/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
+      "https://127.0.0.1:51222/exa.language_server_pb.LanguageServerService/GetUserStatus",
+    ]);
+    if (result.snapshot?.kind === "window") {
+      expect(result.snapshot.modelWindows).toEqual({
+        "Gemini 4 Argon": { usedPercent: 25, resetsAt: Date.parse(IN_3H) },
+      });
+      expect(result.snapshot.extra?.planType).toBe("pro");
+    }
   });
 });
 

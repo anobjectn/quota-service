@@ -18,16 +18,18 @@ const SUBPROCESS_TIMEOUT_MS = 5_000;
 /** Loopback RPCs answer in milliseconds; a port that holds the connection open
  * (e.g. a raw LSP socket) must not eat the collect-on-query budget. */
 const LOCAL_FETCH_TIMEOUT_MS = 2_000;
-/** Total time for local discovery and probing, leaving room inside collect.ts's
- * 12s attempt ceiling for the Cloud Code OAuth fallback. */
-const LOCAL_PROBE_BUDGET_MS = 5_000;
+/** Shared outer wall-clock ceiling for an entire `collectAntigravity` run
+ * (local probe + OAuth fallback combined), leaving comfortable margin under
+ * `collect.ts`'s 12s attempt ceiling. */
+const TOTAL_COLLECT_BUDGET_MS = 10_000;
+/** Total time for local discovery and probing, leaving room inside
+ * `TOTAL_COLLECT_BUDGET_MS` for the Cloud Code OAuth fallback. */
+const LOCAL_PROBE_BUDGET_MS = 4_500;
 /** Per-request timeout for Cloud Code OAuth endpoints so a single stalled
  * host (e.g. cloudcode-pa) leaves room for the daily quota endpoint. */
 const CLOUD_FETCH_TIMEOUT_MS = 3_500;
-/** Shared budget across all sequential Cloud Code OAuth calls so
- * LOCAL_PROBE_BUDGET_MS (5s) + CLOUD_API_BUDGET_MS (6s) stays comfortably
- * inside collect.ts's 12s attempt ceiling. */
-const CLOUD_API_BUDGET_MS = 6_000;
+/** Shared budget across all sequential Cloud Code OAuth calls. */
+const CLOUD_API_BUDGET_MS = 5_000;
 
 const FIVE_HOUR_MIN_SECONDS = 4 * 3600;
 const FIVE_HOUR_TARGET_SECONDS = 5 * 3600;
@@ -634,12 +636,9 @@ function primaryGeminiGroupScore(groupName: string, hasFiveHour: boolean, hasWee
   if (/^(?:google\s+)?gemini(?:\s+(?:models?|all|default|general|shared|core|pool|quota))?$/i.test(trimmed)) {
     return 100 + cadenceBonus;
   }
-  if (/^gemini(?:\s+\d+(?:\.\d+)?)?(?:\s+(?:pro|flash))?(?:\s*\([^)]*\))?$/i.test(trimmed)) {
-    return 75 + cadenceBonus;
-  }
-  if (/\bgemini\b/i.test(trimmed)) {
-    return 50 + cadenceBonus;
-  }
+  // Versioned or model-specific groups (e.g. "Gemini 4 Argon", "Gemini 4 Neon",
+  // "Gemini 3 Pro") must remain in `modelWindows` rather than populating shared
+  // `fiveHour`/`weekly` slots.
   return -1;
 }
 
@@ -647,20 +646,63 @@ function isGenericBucketLabel(label: string, groupLabel: string): boolean {
   const lower = label.trim().toLowerCase();
   if (!lower) return true;
   if (lower === groupLabel.trim().toLowerCase()) return true;
-  return /^(?:5\s*h(?:our|r)?s?|five[_\s-]*hour|session|weekly|week|7\s*d(?:ay)?s?|seven[_\s-]*day|primary|secondary|default|quota|limit)$/.test(
-    lower,
+  // Bare duration tags (e.g. "60s", "1h", "20d") are qualifiers, not model names.
+  if (/^\d+(?:\.\d+)?[smhd]$/.test(lower)) return true;
+  // Generic cadence/quota phrases (e.g. "Weekly quota", "5-hour session",
+  // "Session limit") must not drop the enclosing group's model identity.
+  const normalized = lower.replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  return /^(?:(?:5\s*h(?:our|r)?s?|five\s+hour|session|short\s+term|rolling\s+5h?|weekly|week|7\s*d(?:ay)?s?|seven\s+day|primary|secondary|default|standard|shared|core|pool|bucket|quota|limit|window)\s*)+$/.test(
+    normalized,
   );
+}
+
+function labelContainsGroup(label: string, groupLabel: string): boolean {
+  const normLabel = label.toLowerCase().replace(/[-_\s]+/g, " ").trim();
+  const normGroup = groupLabel.toLowerCase().replace(/[-_\s]+/g, " ").trim();
+  if (!normGroup) return false;
+  return normLabel === normGroup || normLabel.includes(normGroup);
 }
 
 function formatModelWindowKey(
   groupLabel: string,
   bucketLabel: string | null,
   cadence: Cadence,
+  durationSeconds: number | null,
   groupBucketCount: number,
+  isPrimaryGroup: boolean,
 ): string {
   const cadenceSuffix = cadence === "fiveHour" ? "5h" : cadence === "weekly" ? "weekly" : null;
-  const baseLabel =
-    bucketLabel && !isGenericBucketLabel(bucketLabel, groupLabel) ? bucketLabel : groupLabel;
+  const durationSuffix =
+    cadence === "unknown" && durationSeconds !== null ? formatDurationLabel(durationSeconds) : null;
+
+  if (!isPrimaryGroup) {
+    // Non-primary groups represent a distinct model or pool (e.g. "Gemini 4 Argon",
+    // "Gemini 4 Neon", "Claude / GPT"). Never drop the group identity.
+    const bucketIsSpecific = bucketLabel !== null && !isGenericBucketLabel(bucketLabel, groupLabel);
+    const baseLabel =
+      bucketIsSpecific && labelContainsGroup(bucketLabel, groupLabel) ? bucketLabel : groupLabel;
+    const qualifier =
+      cadenceSuffix ??
+      (bucketIsSpecific && !labelContainsGroup(bucketLabel, groupLabel)
+        ? bucketLabel
+        : durationSuffix);
+
+    if (qualifier) {
+      const alreadyTagged =
+        (cadence === "fiveHour" && /\b5h\b|\b5[\s-]*hour/i.test(baseLabel)) ||
+        (cadence === "weekly" && /\bweekly\b|\b7d\b/i.test(baseLabel)) ||
+        baseLabel.toLowerCase().includes(`(${qualifier.toLowerCase()})`);
+      if (!alreadyTagged) {
+        return `${baseLabel} (${qualifier})`;
+      }
+    }
+    return baseLabel;
+  }
+
+  // Leftover buckets inside the shared primary group (e.g. "rpm", "1h",
+  // "monthly_cap", "Gemini Pro", or a second 5h/weekly bucket).
+  const hasSpecificLabel = bucketLabel !== null && !isGenericBucketLabel(bucketLabel, groupLabel);
+  const baseLabel = hasSpecificLabel ? bucketLabel : (durationSuffix ?? groupLabel);
   if (cadenceSuffix) {
     const alreadyTagged =
       (cadence === "fiveHour" && /\b5h\b|\b5[\s-]*hour/i.test(baseLabel)) ||
@@ -669,7 +711,12 @@ function formatModelWindowKey(
       return `${baseLabel} (${cadenceSuffix})`;
     }
   }
-  if (groupBucketCount > 1 && bucketLabel && bucketLabel !== baseLabel) {
+  if (
+    groupBucketCount > 1 &&
+    bucketLabel &&
+    bucketLabel !== baseLabel &&
+    !isGenericBucketLabel(bucketLabel, groupLabel)
+  ) {
     return `${baseLabel} (${bucketLabel})`;
   }
   return baseLabel;
@@ -704,11 +751,12 @@ function buildExtra(
   endpoint: string,
   extraFields: Record<string, unknown> = {},
 ): Record<string, unknown> {
+  const validPlan = plan && typeof plan === "object" ? plan : null;
   return {
-    ...(plan?.planType ? { planType: plan.planType } : {}),
-    ...(plan?.planSource ? { planSource: plan.planSource } : {}),
-    ...(plan?.rawPlanName ? { rawPlanName: plan.rawPlanName } : {}),
-    ...(plan?.tierId ? { tierId: plan.tierId } : {}),
+    ...(validPlan?.planType ? { planType: validPlan.planType } : {}),
+    ...(validPlan?.planSource ? { planSource: validPlan.planSource } : {}),
+    ...(validPlan?.rawPlanName ? { rawPlanName: validPlan.rawPlanName } : {}),
+    ...(validPlan?.tierId ? { tierId: validPlan.tierId } : {}),
     endpoint,
     ...extraFields,
   };
@@ -717,7 +765,6 @@ function buildExtra(
 /** Normalizes a structured `RetrieveUserQuotaSummary` payload into a `WindowSnapshot`. */
 export function normalizeQuotaSummary(
   rawPayload: QuotaSummaryPayload,
-  _now: number,
   plan?: PlanMetadata | null,
   endpoint = "RetrieveUserQuotaSummary",
 ): WindowSnapshot | null {
@@ -843,7 +890,9 @@ export function normalizeQuotaSummary(
           displayGroupLabel,
           fallbackBucketLabel(bucket, group.buckets.length, true),
           bucket.cadence,
+          bucket.durationSeconds,
           group.buckets.length,
+          true,
         );
         insertModelWindow(modelWindows, key, bucket.quota);
       }
@@ -854,7 +903,9 @@ export function normalizeQuotaSummary(
         displayGroupLabel,
         fallbackBucketLabel(bucket, group.buckets.length, false),
         bucket.cadence,
+        bucket.durationSeconds,
         group.buckets.length,
+        false,
       );
       insertModelWindow(modelWindows, key, bucket.quota);
     }
@@ -906,16 +957,24 @@ function normalizeModelEntries(
   if (entries.length === 0) return null;
 
   const modelWindows: Record<string, WindowQuota> = {};
+  const modelWindowIds: Record<string, string> = {};
   for (const entry of entries) {
+    const existing = modelWindows[entry.label];
     insertModelWindow(modelWindows, entry.label, entry.quota);
+    if (entry.modelId && (!existing || entry.quota.usedPercent > existing.usedPercent)) {
+      modelWindowIds[entry.label] = entry.modelId;
+    }
   }
+
+  const extraFields: Record<string, unknown> =
+    Object.keys(modelWindowIds).length > 0 ? { modelWindowIds } : {};
 
   const snapshot: WindowSnapshot = {
     kind: "window",
     fiveHour: null,
     weekly: null,
     modelWindows,
-    extra: buildExtra(plan, endpoint),
+    extra: buildExtra(plan, endpoint, extraFields),
   };
   return hasQuotaData(snapshot) ? snapshot : null;
 }
@@ -923,7 +982,6 @@ function normalizeModelEntries(
 /** Normalizes `GetUserStatus` / `GetCommandModelConfigs` `clientModelConfigs[]` into a `WindowSnapshot`. */
 export function normalizeModelConfigs(
   configs: ClientModelConfigPayload[] | null | undefined,
-  _now: number,
   plan?: PlanMetadata | null,
   endpoint = "GetUserStatus",
 ): WindowSnapshot | null {
@@ -948,7 +1006,6 @@ export function normalizeModelConfigs(
 /** Normalizes Cloud Code `fetchAvailableModels` response into a `WindowSnapshot`. */
 export function normalizeAvailableModels(
   body: FetchAvailableModelsResponse | null | undefined,
-  _now: number,
   plan?: PlanMetadata | null,
 ): WindowSnapshot | null {
   const models = body?.models;
@@ -972,7 +1029,6 @@ export function normalizeAvailableModels(
 /** Normalizes Cloud Code `retrieveUserQuota` buckets into a `WindowSnapshot`. */
 export function normalizeCloudQuotaBuckets(
   body: RetrieveUserQuotaResponse | null | undefined,
-  _now: number,
   plan?: PlanMetadata | null,
 ): WindowSnapshot | null {
   if (!Array.isArray(body?.buckets)) return null;
@@ -1193,19 +1249,9 @@ async function postLoopbackRpc(
     init.tls = { rejectUnauthorized: false };
   }
 
+  let res: Response;
   try {
-    const res = await request(url, init);
-    if (!res.ok) {
-      // Go's net/http TLS server replies HTTP 400 ("Client sent an HTTP request to an HTTPS server")
-      // when probed with plain HTTP; allow scheme fallback from HTTP to HTTPS on 400.
-      const schemeMismatch = scheme === "http" && res.status === 400;
-      return { ok: false, transportError: schemeMismatch, error: `${method} HTTP ${res.status}` };
-    }
-    const json = (await res.json()) as unknown;
-    if (!json || typeof json !== "object" || Array.isArray(json)) {
-      return { ok: false, transportError: false, error: `${method} returned non-object JSON` };
-    }
-    return { ok: true, status: res.status, body: json as Record<string, unknown> };
+    res = await request(url, init);
   } catch (err) {
     return {
       ok: false,
@@ -1213,6 +1259,29 @@ async function postLoopbackRpc(
       error: `${method}: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
+
+  if (!res.ok) {
+    // Go's net/http TLS server replies HTTP 400 ("Client sent an HTTP request to an HTTPS server")
+    // when probed with plain HTTP; allow scheme fallback from HTTP to HTTPS on 400.
+    const schemeMismatch = scheme === "http" && res.status === 400;
+    return { ok: false, transportError: schemeMismatch, error: `${method} HTTP ${res.status}` };
+  }
+
+  let json: unknown;
+  try {
+    json = await res.json();
+  } catch (err) {
+    return {
+      ok: false,
+      transportError: false,
+      error: `${method} returned invalid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  if (!json || typeof json !== "object" || Array.isArray(json)) {
+    return { ok: false, transportError: false, error: `${method} returned non-object JSON` };
+  }
+  return { ok: true, status: res.status, body: json as Record<string, unknown> };
 }
 
 async function queryLocalTarget(
@@ -1221,7 +1290,6 @@ async function queryLocalTarget(
   host: LoopbackHost,
   port: number,
   csrfToken: string | null,
-  capturedAt: number,
   deadline: number,
 ): Promise<{ snapshot: WindowSnapshot | null; transportError: boolean; error: string | null }> {
   const summaryRes = await postLoopbackRpc(request, scheme, host, port, "RetrieveUserQuotaSummary", csrfToken, deadline);
@@ -1233,7 +1301,7 @@ async function queryLocalTarget(
     const payload = summaryRes.body as QuotaSummaryPayload;
     if (!isRpcErrorCode(payload.code)) {
       let plan: PlanMetadata | null = null;
-      const baseSnapshot = normalizeQuotaSummary(payload, capturedAt, null, "RetrieveUserQuotaSummary");
+      const baseSnapshot = normalizeQuotaSummary(payload, null, "RetrieveUserQuotaSummary");
       if (baseSnapshot) {
         // Enrich plan/tier from GetUserStatus on the same working loopback target (best-effort).
         const statusRes = await postLoopbackRpc(request, scheme, host, port, "GetUserStatus", csrfToken, deadline);
@@ -1262,7 +1330,7 @@ async function queryLocalTarget(
     if (!isRpcErrorCode(statusBody.code)) {
       planFromStatus = extractPlanFromUserStatus(statusBody);
       const configs = statusBody.userStatus?.cascadeModelConfigData?.clientModelConfigs;
-      const snapshot = normalizeModelConfigs(configs, capturedAt, planFromStatus, "GetUserStatus");
+      const snapshot = normalizeModelConfigs(configs, planFromStatus, "GetUserStatus");
       if (snapshot) {
         return {
           snapshot: { ...snapshot, extra: { ...snapshot.extra, loopbackHost: host } },
@@ -1283,7 +1351,6 @@ async function queryLocalTarget(
     if (!isRpcErrorCode(cmdBody.code)) {
       const snapshot = normalizeModelConfigs(
         cmdBody.clientModelConfigs,
-        capturedAt,
         planFromStatus,
         "GetCommandModelConfigs",
       );
@@ -1387,7 +1454,6 @@ async function collectFromLocalServer(
           target.host,
           target.port,
           target.csrfToken,
-          capturedAt,
           deadline,
         );
         if (outcome.snapshot) {
@@ -1418,6 +1484,9 @@ async function collectFromLocalServer(
   };
 }
 
+/** Cloud Code `v1internal` endpoints require the Antigravity Hub client
+ * User-Agent (alongside `ideType: "ANTIGRAVITY"` in `loadCodeAssist`) even
+ * when authenticating with a shared local Gemini CLI OAuth token. */
 function cloudCodeHeaders(accessToken: string, arch: string): Record<string, string> {
   return {
     Authorization: `Bearer ${accessToken}`,
@@ -1557,19 +1626,19 @@ async function collectFromCloudApi(
       url: `${DAILY_CLOUD_CODE_BASE}/v1internal:retrieveUserQuotaSummary`,
       emptyError: "retrieveUserQuotaSummary returned no usable quota groups",
       normalize: (data) =>
-        normalizeQuotaSummary(data as QuotaSummaryPayload, capturedAt, plan, "retrieveUserQuotaSummary"),
+        normalizeQuotaSummary(data as QuotaSummaryPayload, plan, "retrieveUserQuotaSummary"),
     },
     {
       name: "fetchAvailableModels",
       url: `${CLOUD_CODE_BASE}/v1internal:fetchAvailableModels`,
       emptyError: "fetchAvailableModels returned no usable model quotas",
-      normalize: (data) => normalizeAvailableModels(data as FetchAvailableModelsResponse, capturedAt, plan),
+      normalize: (data) => normalizeAvailableModels(data as FetchAvailableModelsResponse, plan),
     },
     {
       name: "retrieveUserQuota",
       url: `${CLOUD_CODE_BASE}/v1internal:retrieveUserQuota`,
       emptyError: "retrieveUserQuota returned no usable quota buckets",
-      normalize: (data) => normalizeCloudQuotaBuckets(data as RetrieveUserQuotaResponse, capturedAt, plan),
+      normalize: (data) => normalizeCloudQuotaBuckets(data as RetrieveUserQuotaResponse, plan),
     },
   ];
 
@@ -1625,12 +1694,16 @@ export async function collectAntigravity(
   const getHome = dependencies.homedir ?? homedir;
   const arch = dependencies.arch ?? process.arch;
 
+  const localBudgetMs = dependencies.localProbeBudgetMs ?? LOCAL_PROBE_BUDGET_MS;
+  const cloudBudgetMs = dependencies.cloudApiBudgetMs ?? CLOUD_API_BUDGET_MS;
+  const overallDeadline = Date.now() + Math.min(TOTAL_COLLECT_BUDGET_MS, localBudgetMs + cloudBudgetMs);
+
   // Tactic A: local Antigravity language_server / agy Connect-RPC.
   const local = await collectFromLocalServer(
     request,
     runCommand,
     capturedAt,
-    dependencies.localProbeBudgetMs ?? LOCAL_PROBE_BUDGET_MS,
+    Math.min(localBudgetMs, Math.max(1, overallDeadline - Date.now())),
   );
   if (local.result) {
     return local.result;
@@ -1656,11 +1729,16 @@ export async function collectAntigravity(
     };
   }
 
+  const remainingCloudBudgetMs = Math.min(cloudBudgetMs, Math.max(0, overallDeadline - Date.now()));
+  if (remainingCloudBudgetMs <= 0) {
+    return unavailableCloudResult(capturedAt, `Antigravity collector exceeded its ${TOTAL_COLLECT_BUDGET_MS}ms budget`);
+  }
+
   return collectFromCloudApi(
     request,
     creds.credential,
     capturedAt,
     arch,
-    dependencies.cloudApiBudgetMs ?? CLOUD_API_BUDGET_MS,
+    remainingCloudBudgetMs,
   );
 }

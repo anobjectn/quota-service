@@ -191,7 +191,7 @@ export interface ResetsReport {
   generatedAt: number;
   windows: Array<{
     provider: Provider;
-    window: "fiveHour" | "weekly" | string;
+    window: "fiveHour" | "weekly" | `model:${string}`;
     usedPercent: number;
     resetsAt: number | null;
     /** When this reading was collected. It can be older than the newest
@@ -248,7 +248,7 @@ export function buildResetsReport(
           capturedAt: latest.capturedAt,
         });
       }
-      if (latest.snapshot.modelWindows) {
+      if (provider === "antigravity" && latest.snapshot.modelWindows) {
         for (const [name, modelWindow] of Object.entries(latest.snapshot.modelWindows)) {
           if (!modelWindow || !Number.isFinite(modelWindow.usedPercent)) continue;
           windows.push({

@@ -127,7 +127,10 @@ export function normalizeSnapshotRow(db: Database, row: SnapshotRow): QuotaObser
         cycleId: cycleId(window.resetsAt, row.observedAt),
       }];
     });
-    const modelWindows = snapshot.modelWindows && typeof snapshot.modelWindows === "object"
+    // Emit `model:<name>` windows for Antigravity (whose per-model fallback
+    // endpoints populate `modelWindows` with null `fiveHour`/`weekly`) without
+    // changing the existing Anthropic/Codex `/history` output contract.
+    const modelWindows = row.provider === "antigravity" && snapshot.modelWindows && typeof snapshot.modelWindows === "object"
       ? Object.entries(snapshot.modelWindows).flatMap(([name, window]) => {
           if (!window || !Number.isFinite(window.usedPercent)) return [];
           const resetsAt = window.resetsAt ?? null;
