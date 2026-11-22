@@ -130,7 +130,19 @@ describe("identityConstrainsModel", () => {
 describe("coerceModelIdentity", () => {
   test("stored family scopes from older snapshots widen to every Gemini model", () => {
     expect(coerceModelIdentity({ model: null, family: "gemini-4" })).toEqual(ALL_GEMINI_IDENTITY);
-    expect(coerceModelIdentity({ model: "gemini-4-argon", family: "gemini-4" })).toEqual({ model: "gemini-4-argon", family: "gemini" });
+    expect(coerceModelIdentity({ model: "gemini-4-argon", family: "gemini" })).toEqual({ model: "gemini-4-argon", family: "gemini" });
+    expect(coerceModelIdentity({ model: "claude-opus-5-5", family: null })).toEqual({ model: "claude-opus-5-5", family: null });
+    // A stored model whose family is missing or is not the one its ID implies
+    // (including old "gemini-4" scopes) limits every Gemini text model.
+    for (const raw of [
+      { model: "gemini-4-argon", family: "gemini-4" },
+      { model: "imagen-4", family: [] },
+      { model: "imagen-4" },
+      { model: "imagen-4", family: "gemini" },
+      { model: "claude-opus-5-5", family: "gemini" },
+    ]) {
+      expect(coerceModelIdentity(raw)).toEqual(ALL_GEMINI_IDENTITY);
+    }
     expect(coerceModelIdentity({ model: null, family: null })).toEqual(NO_MODEL_IDENTITY);
     // A stored ID is read back only when it is already canonical.
     expect(coerceModelIdentity({ model: "gemini-4-neon-high", family: "gemini" })).toEqual(ALL_GEMINI_IDENTITY);

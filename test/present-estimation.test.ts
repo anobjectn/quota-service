@@ -365,6 +365,30 @@ test("per-model entries are identified only by their exact model ID", () => {
     ];
     expect(recommendFrom(normalizeModelConfigs(order ? entries.reverse() : entries))).toBe("Gemini 4 Argon@1");
   }
+  // Only the entry's own modelId identifies it: an ID-shaped modelOrAlias.model,
+  // or a malformed or non-canonical modelId next to a pool label, limits every
+  // Gemini text model.
+  for (const odd of [
+    { label: "Standard", modelOrAlias: { model: "imagen-4" } },
+    { label: "Image generation", modelId: { value: "gemini-4" } },
+    { label: "Image generation", modelId: "gemini-4-argon-001-high" },
+    { label: "Claude and GPT models", modelId: "MODEL_PLACEHOLDER_M999" },
+  ]) {
+    expect(recommendFrom(normalizeModelConfigs([
+      { label: "Argon", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
+      { ...odd, quotaInfo: { remainingFraction: 0 } } as never,
+    ]))).toBe("Gemini 4 Argon@0");
+  }
+  // A stored image ID whose family is missing or wrong limits every Gemini text model.
+  for (const stored of [{ model: "imagen-4", family: [] }, { model: "imagen-4" }, { model: "imagen-4", family: "gemini" }]) {
+    expect(recommendFrom({
+      kind: "window",
+      fiveHour: { usedPercent: 10, resetsAt: null },
+      weekly: null,
+      modelWindows: { X: { usedPercent: 100, resetsAt: null } },
+      extra: { modelWindowIdentity: { X: stored } },
+    })).toBe("Gemini 4 Argon@0");
+  }
   // A doubly suffixed ID stays an unknown model after the stored record is read back.
   expect(recommendFrom(normalizeModelConfigs([
     { label: "Argon", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },

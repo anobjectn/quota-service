@@ -123,7 +123,8 @@ export function identityConstrainsModel(window: ModelIdentity, candidate: ModelI
 
 /** Reads a stored identity record value. The explicit "no identity" record
  * `{model: null, family: null}` (a partner pool) is kept; a stored model is
- * read as a model ID (display strings are not IDs); a stored "image" family
+ * read as a model ID only when it is canonical and its family is the one that
+ * ID implies (display strings are not IDs); a stored "image" family
  * is an image pool; anything else, malformed or unrecognized (including old
  * family scopes such as "gemini-4"), limits every Gemini text model. */
 export function coerceModelIdentity(raw: unknown): ModelIdentity {
@@ -131,11 +132,12 @@ export function coerceModelIdentity(raw: unknown): ModelIdentity {
   const { model, family } = raw as { model?: unknown; family?: unknown };
   if (model === null && family === null) return NO_MODEL_IDENTITY;
   if (typeof model === "string") {
-    // The collector stores canonical IDs; read one back only if it is already
-    // canonical, so a stored "gemini-4-neon-high" is never narrowed again.
+    // The collector stores a canonical ID with its own family; read one back
+    // only when both match exactly, so a stored "gemini-4-neon-high", or an
+    // image ID whose family is missing or wrong, is never narrowed.
     const stored = model.trim().toLowerCase();
     const identity = modelIdIdentity(stored);
-    return identity.model === stored ? identity : ALL_GEMINI_IDENTITY;
+    return identity.model === stored && family === identity.family ? identity : ALL_GEMINI_IDENTITY;
   }
   if (model === null && family === IMAGE_GENERATION_IDENTITY.family) return IMAGE_GENERATION_IDENTITY;
   return ALL_GEMINI_IDENTITY;

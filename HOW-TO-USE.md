@@ -221,7 +221,10 @@ are never read for model or pool names. The supported inputs are:
 - **Exact model IDs.** A per-model entry's `modelId` (effort suffixes such as
   `-high` and `-001` releases removed, and a whole `models/` or
   `projects/<p>/[locations/<l>/][publishers/<p>/]models/` resource prefix)
-  limits only that model. An alias is never read as a model ID, and an ID
+  limits only that model. Only the entry's own `modelId` counts:
+  `modelOrAlias` (model or alias) is never read as a model ID, and a
+  `modelId` that is malformed or not a canonical ID limits every Gemini text
+  model even when the entry's label is a pool name. An ID
   that still ends in an effort or release suffix after one is removed
   (`-high-high`, `-high-001`) is not a model ID.
 - **Summary groups the server names.** A `RetrieveUserQuotaSummary` group

@@ -1134,12 +1134,32 @@ export function normalizeQuotaSummary(
 }
 
 interface NormalizedModelEntry {
+  /** Used for keys and display; may come from `modelOrAlias.model`. */
   modelId: string;
+  /** The entry's own model ID as supplied (`modelId`, or the map key). Only
+   * this identifies the model: absent means "look at the supplied pool name",
+   * and a value that is not a canonical model ID limits every Gemini model. */
+  identityId: unknown;
   /** The display name the payload supplied, or null when `label` is generated
    * from the model ID. Only a supplied name is matched against pool names. */
   suppliedLabel: string | null;
   label: string;
   quota: WindowQuota;
+}
+
+/** Only the entry's own exact model ID identifies the model; the display label
+ * is never parsed. An entry with no model ID is a Gemini quota of unknown
+ * scope unless its supplied name is a known pool name; an entry whose model ID
+ * is malformed or not canonical ("MODEL_PLACEHOLDER_M417", "x-001-high")
+ * limits every Gemini model. */
+function modelEntryIdentity(entry: NormalizedModelEntry): ModelIdentity {
+  const raw = entry.identityId;
+  if (raw === undefined || raw === null || (typeof raw === "string" && !raw.trim())) {
+    return poolNameIdentity(entry.suppliedLabel);
+  }
+  if (typeof raw !== "string") return ALL_GEMINI_IDENTITY;
+  const fromId = modelIdIdentity(raw);
+  return fromId.model !== null ? fromId : ALL_GEMINI_IDENTITY;
 }
 
 function prettifyModelId(modelId: string): string {
@@ -1189,12 +1209,7 @@ function normalizeModelEntries(
     const distinctIds = idsByLabel.get(entry.label);
     const preferredKey =
       distinctIds && distinctIds.size > 1 ? `${entry.label} [${entry.modelId || "unscoped"}]` : entry.label;
-    // Only the exact model ID identifies the model; the display label is never
-    // parsed. An entry without a model ID is a Gemini quota of unknown scope
-    // (unless its supplied name is a known pool name), so it limits every
-    // Gemini model.
-    const fromId = modelIdIdentity(entry.modelId);
-    const identity = fromId.model !== null ? fromId : poolNameIdentity(entry.suppliedLabel);
+    const identity = modelEntryIdentity(entry);
     // A generated key can equal another entry's literal label ("Foo [id]");
     // recordWindow never lets windows with different identities share a key.
     recordWindow(modelWindows, modelWindowIdentity, preferredKey, entry.quota, identity);
@@ -1232,6 +1247,7 @@ export function normalizeModelConfigs(
     const label = suppliedLabel ?? prettifyModelId(modelId || (nonEmptyString(cfg.modelOrAlias?.alias) ?? ""));
     entries.push({
       modelId,
+      identityId: (cfg as { modelId?: unknown }).modelId,
       suppliedLabel,
       label,
       quota: { usedPercent, resetsAt },
@@ -1257,6 +1273,7 @@ export function normalizeAvailableModels(
     const label = suppliedLabel ?? prettifyModelId(modelId);
     entries.push({
       modelId,
+      identityId: modelId,
       suppliedLabel,
       label,
       quota: { usedPercent, resetsAt },
@@ -1282,6 +1299,7 @@ export function normalizeCloudQuotaBuckets(
     const label = suppliedLabel ?? prettifyModelId(modelId);
     entries.push({
       modelId,
+      identityId: (bucket as { modelId?: unknown }).modelId,
       suppliedLabel,
       label,
       quota: { usedPercent, resetsAt },
