@@ -5,6 +5,7 @@ import {
   normalizeAntigravityPlanType,
   normalizeAvailableModels,
   normalizeQuotaSummary,
+  extractCsrfTokenFromEnvironment,
   parseAntigravityOauthCredentials,
   parseAntigravityProcesses,
   parseListeningEndpoints,
@@ -13,6 +14,12 @@ import {
 } from "../src/collectors/antigravity";
 
 const NOW = Date.parse("2026-11-21T16:00:00Z");
+/** The server's model list (GetUserStatus groupedModels), which decides which summary groups are model-specific. */
+const KNOWN_MODELS = [
+  { id: "gemini-4-argon", displayName: "Gemini 4 Argon" },
+  { id: "gemini-4-neon", displayName: "Gemini 4 Neon" },
+  { id: "gemini-3.8-flash", displayName: "Gemini 3.8 Flash" },
+];
 const IN_3H = new Date(NOW + 3 * 3600 * 1000).toISOString();
 const IN_5D = new Date(NOW + 5 * 24 * 3600 * 1000).toISOString();
 const IN_18H = new Date(NOW + 18 * 3600 * 1000).toISOString();
@@ -75,6 +82,12 @@ describe("Antigravity process and port detection", () => {
     });
     expect(procs[1]).toMatchObject({ pid: 105, kind: "agy", csrfToken: null });
     expect(procs[2]).toMatchObject({ pid: 107, kind: "agy", csrfToken: null });
+  });
+
+  test("reads only the Antigravity 2.34 CSRF token variable from a process environment listing", () => {
+    expect(extractCsrfTokenFromEnvironment("/x/language_server --standalone PATH=/bin ANTIGRAVITY_SERVER_CSRF_TOKEN=abc-123 HOME=/h")).toBe("abc-123");
+    expect(extractCsrfTokenFromEnvironment("/x/language_server --standalone PATH=/bin")).toBeNull();
+    expect(extractCsrfTokenFromEnvironment("/x/language_server X_ANTIGRAVITY_SERVER_CSRF_TOKEN=nope")).toBeNull();
   });
 
   test("parses deduplicated loopback listening endpoints preserving IPv4 vs IPv6", () => {
@@ -322,7 +335,7 @@ describe("Antigravity normalization helpers", () => {
     // Sole versioned Gemini group stays in modelWindows rather than populating shared fiveHour.
     const argonOnly = normalizeQuotaSummary({
       groups: [{ displayName: "Gemini 4 Argon", buckets: [{ displayName: "Session", remainingFraction: 0 }] }],
-    });
+    }, null, undefined, KNOWN_MODELS);
     expect(argonOnly).not.toBeNull();
     expect(argonOnly!.fiveHour).toBeNull();
     expect(argonOnly!.weekly).toBeNull();
@@ -339,7 +352,7 @@ describe("Antigravity normalization helpers", () => {
         { displayName: "Gemini 4 Argon", buckets: [{ window: "3600s", remainingFraction: 0 }] },
         { displayName: "Claude / GPT", buckets: [{ window: "3600s", remainingFraction: 0.8 }] },
       ],
-    });
+    }, null, undefined, KNOWN_MODELS);
     expect(multiGroup).not.toBeNull();
     expect(multiGroup!.fiveHour).toEqual({ usedPercent: 10, resetsAt: null });
     expect(multiGroup!.weekly).toEqual({ usedPercent: 10, resetsAt: null });
@@ -349,8 +362,8 @@ describe("Antigravity normalization helpers", () => {
       "Claude / GPT (1h)": { usedPercent: 20, resetsAt: null },
     });
     expect(multiGroup!.extra?.modelWindowIdentity).toEqual({
-      "Gemini 4 Neon (weekly)": { model: "gemini-4-neon", family: "gemini-4" },
-      "Gemini 4 Argon (1h)": { model: "gemini-4-argon", family: "gemini-4" },
+      "Gemini 4 Neon (weekly)": { model: "gemini-4-neon", family: "gemini" },
+      "Gemini 4 Argon (1h)": { model: "gemini-4-argon", family: "gemini" },
       "Claude / GPT (1h)": { model: null, family: null },
     });
 
@@ -365,15 +378,15 @@ describe("Antigravity normalization helpers", () => {
           { bucketId: "background", displayName: "Background", window: "18000s", remainingFraction: 0.2, resetTime: t2 },
         ],
       }],
-    });
+    }, null, undefined, KNOWN_MODELS);
     expect(sameCadence).not.toBeNull();
     expect(sameCadence!.modelWindows).toEqual({
       "Gemini 4 Argon (Interactive, 5h)": { usedPercent: 10, resetsAt: Date.parse(t1) },
       "Gemini 4 Argon (Background, 5h)": { usedPercent: 80, resetsAt: Date.parse(t2) },
     });
     expect(sameCadence!.extra?.modelWindowIdentity).toEqual({
-      "Gemini 4 Argon (Interactive, 5h)": { model: "gemini-4-argon", family: "gemini-4" },
-      "Gemini 4 Argon (Background, 5h)": { model: "gemini-4-argon", family: "gemini-4" },
+      "Gemini 4 Argon (Interactive, 5h)": { model: "gemini-4-argon", family: "gemini" },
+      "Gemini 4 Argon (Background, 5h)": { model: "gemini-4-argon", family: "gemini" },
     });
 
     // Two unlabeled, ID-less buckets sharing a cadence stay distinct via stable ordinal suffixes.
@@ -385,60 +398,26 @@ describe("Antigravity normalization helpers", () => {
           { window: "18000s", remainingFraction: 0.2, resetTime: t2 },
         ],
       }],
-    });
+    }, null, undefined, KNOWN_MODELS);
     expect(unlabeledDup!.modelWindows).toEqual({
       "Gemini 4 Argon (5h) #1": { usedPercent: 10, resetsAt: Date.parse(t1) },
       "Gemini 4 Argon (5h) #2": { usedPercent: 80, resetsAt: Date.parse(t2) },
     });
 
-    // Model-specific bucket listed first inside shared Gemini group (by displayName OR bucketId)
-    // never steals shared weekly from the generic/shared Weekly bucket.
+    // Bucket labels and IDs never narrow a window: inside the shared Gemini
+    // group every bucket limits every Gemini model, and both are kept.
     const modelFirst = normalizeQuotaSummary({
       groups: [{
         displayName: "Gemini",
         buckets: [
-          { displayName: "Gemini 4 Neon weekly", remainingFraction: 0 },
+          { displayName: "Gemini 4 Neon weekly", bucketId: "gemini-4-neon-weekly", remainingFraction: 0 },
           { displayName: "Weekly", remainingFraction: 0.9 },
         ],
       }],
-    });
-    expect(modelFirst).not.toBeNull();
-    expect(modelFirst!.weekly).toEqual({ usedPercent: 10, resetsAt: null });
-    expect(modelFirst!.modelWindows).toEqual({
-      "Gemini 4 Neon weekly": { usedPercent: 100, resetsAt: null },
-    });
-
-    for (const modelBucketId of ["gemini-4-neon-weekly", "gemini_4_neon_weekly"]) {
-      const byBucketId = normalizeQuotaSummary({
-        groups: [{
-          displayName: "Gemini",
-          buckets: [
-            { bucketId: modelBucketId, window: "604800s", remainingFraction: 0 },
-            { bucketId: "shared-weekly", window: "604800s", remainingFraction: 0.9 },
-          ],
-        }],
-      });
-      expect(byBucketId!.weekly).toEqual({ usedPercent: 10, resetsAt: null });
-      expect(byBucketId!.modelWindows).toEqual({
-        [modelBucketId]: { usedPercent: 100, resetsAt: null },
-      });
-    }
-
-    // A generic "Weekly" display label does not hide a model-specific bucketId,
-    // in either bucket order.
-    for (const reversed of [false, true]) {
-      const buckets = [
-        { displayName: "Weekly", bucketId: "gemini-4-neon-weekly", window: "604800s", remainingFraction: 0 },
-        { displayName: "Weekly", bucketId: "shared-weekly", window: "604800s", remainingFraction: 0.9 },
-      ];
-      const labelledById = normalizeQuotaSummary({
-        groups: [{ displayName: "Gemini", buckets: reversed ? buckets.reverse() : buckets }],
-      });
-      expect(labelledById!.weekly).toEqual({ usedPercent: 10, resetsAt: null });
-      expect(labelledById!.modelWindows).toEqual({
-        "gemini-4-neon-weekly": { usedPercent: 100, resetsAt: null },
-      });
-    }
+    }, null, undefined, KNOWN_MODELS);
+    expect(modelFirst!.weekly).toEqual({ usedPercent: 100, resetsAt: null });
+    expect(modelFirst!.modelWindows).toEqual({ "Gemini (weekly)": { usedPercent: 10, resetsAt: null } });
+    expect(modelFirst!.extra?.modelWindowIdentity).toEqual({ "Gemini (weekly)": { model: null, family: "gemini" } });
 
     // Structured groups with distinct canonical names sharing displayName ("Gemini 4" or "Gemini")
     // stay disambiguated across groups regardless of order and never promote to shared weekly.
@@ -448,15 +427,15 @@ describe("Antigravity normalization helpers", () => {
           { name: "gemini-4-argon", displayName, buckets: [{ displayName: "Weekly", remainingFraction: 0, resetTime: t1 }] },
           { name: "gemini-4-neon", displayName, buckets: [{ displayName: "Weekly", remainingFraction: 0.9, resetTime: t2 }] },
         ],
-      });
+      }, null, undefined, KNOWN_MODELS);
       expect(dupGroups!.weekly).toBeNull();
       expect(dupGroups!.modelWindows).toEqual({
         [`${displayName} (weekly) [gemini-4-argon]`]: { usedPercent: 100, resetsAt: Date.parse(t1) },
         [`${displayName} (weekly) [gemini-4-neon]`]: { usedPercent: 10, resetsAt: Date.parse(t2) },
       });
       expect(dupGroups!.extra?.modelWindowIdentity).toEqual({
-        [`${displayName} (weekly) [gemini-4-argon]`]: { model: "gemini-4-argon", family: "gemini-4" },
-        [`${displayName} (weekly) [gemini-4-neon]`]: { model: "gemini-4-neon", family: "gemini-4" },
+        [`${displayName} (weekly) [gemini-4-argon]`]: { model: "gemini-4-argon", family: "gemini" },
+        [`${displayName} (weekly) [gemini-4-neon]`]: { model: "gemini-4-neon", family: "gemini" },
       });
     }
   });
@@ -474,8 +453,8 @@ describe("Antigravity normalization helpers", () => {
       "Gemini 4 [gemini-4-neon]": { usedPercent: 100, resetsAt: null },
     });
     expect(snap!.extra?.modelWindowIdentity).toEqual({
-      "Gemini 4 [gemini-4-argon]": { model: "gemini-4-argon", family: "gemini-4" },
-      "Gemini 4 [gemini-4-neon]": { model: "gemini-4-neon", family: "gemini-4" },
+      "Gemini 4 [gemini-4-argon]": { model: "gemini-4-argon", family: "gemini" },
+      "Gemini 4 [gemini-4-neon]": { model: "gemini-4-neon", family: "gemini" },
     });
   });
 
@@ -497,7 +476,7 @@ describe("Antigravity normalization helpers", () => {
         "Gemini 3 Pro": { usedPercent: 60, resetsAt: Date.parse(reset) },
       });
       expect(snap!.extra?.modelWindowIdentity).toEqual({
-        "Gemini 3 Pro": { model: "gemini-3-pro", family: "gemini-3" },
+        "Gemini 3 Pro": { model: "gemini-3-pro", family: "gemini" },
       });
     }
   });

@@ -138,7 +138,7 @@ this file only accumulates what the collectors observed.
 | Codex reset credits | GET `.../wham/rate-limit-reset-credits` — **report only**, this service never calls the `/consume` endpoint | same as above | same as above |
 | Anthropic | GET `api.anthropic.com/api/oauth/usage` with required `anthropic-beta: oauth-2025-04-20` and `User-Agent: claude-code/<version>` headers | in-memory only | macOS Keychain item **"Claude Code-credentials"**, re-read fresh every poll via `security find-generic-password`, never persisted |
 | Warp | `defaults read dev.warp.Warp-Stable AIRequestLimitInfo` (Warp stores this key as a JSON string, so it parses directly) | plist mtime as data-age signal | none — no credentials involved |
-| Antigravity | Tactic A (`antigravity_local`, macOS `ps` + `lsof`): detects local Antigravity `language_server`/`agy` and calls read-only Connect-RPC (`RetrieveUserQuotaSummary`, `GetUserStatus`, `GetCommandModelConfigs`) over loopback (`127.0.0.1` / `[::1]`). Tactic B (`antigravity_api`): read-only Cloud Code OAuth (`loadCodeAssist` -> `retrieveUserQuotaSummary`, fallback `fetchAvailableModels` / `retrieveUserQuota`). Structured summary endpoints populate `fiveHour`/`weekly`; per-model fallback endpoints report named entries in `modelWindows` (and `model:<name>` in `/resets` and `/history`) without guessing cadence | in-memory only (60s poll floor) | Local CSRF token from process args (or tokenless `agy`), or read-only OAuth credentials from `ANTIGRAVITY_OAUTH_CREDENTIALS_JSON`, `QUOTA_ANTIGRAVITY_AUTH_PATH`, `~/.gemini/antigravity-cli/antigravity-oauth-token`, `~/.gemini/oauth_creds.json` (Gemini CLI OAuth token reused with Antigravity Hub client identity required by Cloud Code), or `~/.codexbar/antigravity/oauth_creds.json`; never writes/refreshes tokens or calls `onboardUser` |
+| Antigravity | Tactic A (`antigravity_local`, macOS `ps` + `lsof`): detects local Antigravity `language_server`/`agy` and calls read-only Connect-RPC (`RetrieveUserQuotaSummary`, `GetUserStatus`, `GetCommandModelConfigs`) over loopback (`127.0.0.1` / `[::1]`). Tactic B (`antigravity_api`): read-only Cloud Code OAuth (`loadCodeAssist` -> `retrieveUserQuotaSummary`, fallback `fetchAvailableModels` / `retrieveUserQuota`). Structured summary endpoints populate `fiveHour`/`weekly`; per-model fallback endpoints report named entries in `modelWindows` (and `model:<name>` in `/resets` and `/history`) without guessing cadence | in-memory only (60s poll floor) | Local CSRF token from process args, or on Antigravity 2.34+ (`--standalone`) from the language server's `ANTIGRAVITY_SERVER_CSRF_TOKEN` environment variable (read with `ps eww` for that one process; no other variable is kept), or tokenless `agy`; or read-only OAuth credentials from `ANTIGRAVITY_OAUTH_CREDENTIALS_JSON`, `QUOTA_ANTIGRAVITY_AUTH_PATH`, `~/.gemini/antigravity-cli/antigravity-oauth-token`, `~/.gemini/oauth_creds.json` (Gemini CLI OAuth token reused with Antigravity Hub client identity required by Cloud Code), or `~/.codexbar/antigravity/oauth_creds.json`; never writes/refreshes tokens or calls `onboardUser` |
 
 ### Codex freshness upgrade, concretely
 
@@ -214,6 +214,19 @@ weekly / any present per-model window has the least headroom, and the
 `reason` string names it (e.g. `"...on its Fable weekly window"` or
 `"...on its 5h window"`). A fresh per-model bucket can make the frontier tier
 cheaper to recommend even when the all-models weekly window is tight.
+
+For Antigravity, each window records the models it limits, and the rule never
+reads labels. A window limits one model only when the API gives it an exact
+model ID: a per-model entry's `modelId` (effort suffixes such as `-high` are
+removed), or a `RetrieveUserQuotaSummary` group whose name or display name
+matches a model in the same server's `GetUserStatus` model list (for example
+the "Gemini 4 Argon" group). A partner pool ("Claude and GPT models") limits no
+Gemini model. Every other window limits every Gemini model, including the
+shared "Gemini Models" group and any group the server's model list does not
+name. This fails closed: an unrecognized pool that runs out makes every Gemini
+model look exhausted, and the Cloud Code fallback (which has no model list)
+treats the Argon group as shared. On Google AI Pro, Argon's separate weekly
+quota is still limited by the shared Gemini windows too.
 
 ### Warp: manual entry for add-on credits
 

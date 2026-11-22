@@ -39,12 +39,11 @@ import type { Provider } from "./types";
 import type { UsageReport, ProviderReport } from "./present";
 import {
   ALL_GEMINI_IDENTITY,
+  NO_MODEL_IDENTITY,
   coerceModelIdentity,
-  hasModelIdentity,
   identityConstrainsModel,
   mentionsOnlyPartnerFamily,
-  mergeModelIdentities,
-  parseModelIdentity,
+  modelIdIdentity,
   type ModelIdentity,
 } from "./model-identity";
 
@@ -231,14 +230,13 @@ function minPrimaryWindowHeadroom(
 }
 
 /** Returns each model window's identity. Snapshots from the Antigravity
- * collector carry one resolved identity per window in
- * `extra.modelWindowIdentity`, and that record is authoritative: a window it
- * lists without an identity (a partner pool) binds no candidate. Snapshots
- * saved before that field existed fall back to the same grammar: the window's
- * recorded model ID merged with its key (collision disambiguators such as
- * "[id]" or "#2" removed). For a quota-summary snapshot, a window that names
- * no model family and no partner is a Gemini quota of unknown scope and binds
- * every Gemini candidate, as the collector does now. */
+ * collector carry one identity per window in `extra.modelWindowIdentity`, and
+ * that record is authoritative: a window it lists without an identity (a
+ * partner pool) binds no candidate, and a window it does not list binds every
+ * Gemini candidate. Snapshots saved before that field existed use the same
+ * rule as the collector: the window's recorded model ID or its key (collision
+ * disambiguators such as "[id]" or "#2" removed) when it is an exact model ID,
+ * else no identity for a partner-only name, else every Gemini model. */
 function modelWindowIdentityLookup(extra: Record<string, unknown> | undefined): (name: string) => ModelIdentity {
   const typed = extra?.modelWindowIdentity;
   if (typed && typeof typed === "object" && !Array.isArray(typed)) {
@@ -250,22 +248,23 @@ function modelWindowIdentityLookup(extra: Record<string, unknown> | undefined): 
     legacyIds && typeof legacyIds === "object" && !Array.isArray(legacyIds)
       ? (legacyIds as Record<string, unknown>)
       : {};
-  const isQuotaSummary = extra?.endpoint === "RetrieveUserQuotaSummary";
   return (name) => {
     const recorded = Object.hasOwn(ids, name) && typeof ids[name] === "string" ? (ids[name] as string) : null;
     const key = name.trim().replace(/(?:\s+(?:\[[^\]]*\]|#\d+))+$/, "");
-    const identity = mergeModelIdentities([parseModelIdentity(recorded), parseModelIdentity(key)]);
-    if (hasModelIdentity(identity) || !isQuotaSummary) return identity;
-    return mentionsOnlyPartnerFamily(`${recorded ?? ""} ${key}`) ? identity : ALL_GEMINI_IDENTITY;
+    for (const candidate of [recorded, key]) {
+      const identity = modelIdIdentity(candidate);
+      if (identity.model !== null) return identity;
+    }
+    return mentionsOnlyPartnerFamily(`${recorded ?? ""} ${key}`) ? NO_MODEL_IDENTITY : ALL_GEMINI_IDENTITY;
   };
 }
 
 /** For Antigravity candidates, the binding constraint is the MINIMUM headroom
  * across any shared limits (`fiveHour`, `weekly`) AND any `modelWindows` entry
- * whose resolved identity (see `modelWindowIdentityLookup`) limits that
- * candidate: a model window limits only the same model, so a sibling variant
- * such as "gemini-4-argon-lite" never limits "gemini-4-argon"; a family-only
- * window ("gemini-4") limits every model in that family. Unrelated models'
+ * whose identity (see `modelWindowIdentityLookup`) limits that candidate: a
+ * model window limits only the same exact model ID, so a sibling such as
+ * "gemini-4-argon-lite" never limits "gemini-4-argon"; an all-Gemini window
+ * limits every Gemini candidate. Unrelated models'
  * buckets are never borrowed: if neither shared limits nor a matching model
  * window exist for a candidate, its headroom is `null` (unknown) so ranking
  * falls back honestly to a measured tier. */
@@ -286,9 +285,7 @@ function computeAntigravityCandidateHeadroom(
   const modelWindows = report.snapshot.modelWindows;
   if (modelWindows) {
     const identityOf = modelWindowIdentityLookup(report.snapshot.extra);
-    const candidates = [...(option.modelIds ?? []), option.model]
-      .map(parseModelIdentity)
-      .filter(hasModelIdentity);
+    const candidates = (option.modelIds ?? []).map(modelIdIdentity).filter((c) => c.model !== null);
 
     for (const [name, w] of Object.entries(modelWindows)) {
       if (!w || !Number.isFinite(w.usedPercent)) continue;

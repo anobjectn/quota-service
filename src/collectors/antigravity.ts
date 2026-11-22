@@ -12,12 +12,10 @@ import { join } from "node:path";
 import { finiteNumber, parseInstant } from "../lib/time";
 import {
   ALL_GEMINI_IDENTITY,
-  isQualifierOnlyText,
-  isVersionedFamily,
+  NO_MODEL_IDENTITY,
+  canonicalModelId,
   mentionsOnlyPartnerFamily,
-  mergeModelIdentities,
-  parseModelIdentity,
-  resolveLabelIdentity,
+  modelIdIdentity,
   type ModelIdentity,
 } from "../model-identity";
 import type { CollectorResult, WindowQuota, WindowSnapshot } from "../types";
@@ -159,6 +157,8 @@ export interface QuotaSummaryPayload {
 
 export interface ClientModelConfigPayload {
   label?: string | null;
+  /** Exact model ID ("gemini-4-neon-high"); `modelOrAlias.model` is an opaque enum name. */
+  modelId?: string | null;
   disabled?: boolean | null;
   modelOrAlias?: {
     model?: string | null;
@@ -191,6 +191,8 @@ export interface GetUserStatusResponse {
     } | null;
     cascadeModelConfigData?: {
       clientModelConfigs?: ClientModelConfigPayload[] | null;
+      /** Base model ID -> display name ("gemini-4-argon" -> "Gemini 4 Argon"). */
+      groupedModels?: Record<string, { displayName?: string | null } | null> | null;
     } | null;
   } | null;
 }
@@ -512,6 +514,18 @@ export function parseAntigravityProcesses(psOutput: string): AntigravityProcessI
   return found;
 }
 
+/** Antigravity 2.34+ starts its language server with `--standalone` and passes the
+ * CSRF token in this environment variable instead of a `--csrf_token` flag. */
+const CSRF_TOKEN_ENV_VAR = "ANTIGRAVITY_SERVER_CSRF_TOKEN";
+
+/** Extracts the language server CSRF token from `ps eww -o command= -p <pid>` output
+ * (the command line followed by the process environment). Only this one variable is
+ * read; the rest of the environment is discarded. */
+export function extractCsrfTokenFromEnvironment(psEnvOutput: string): string | null {
+  const match = psEnvOutput.match(new RegExp(`(?:^|\\s)${CSRF_TOKEN_ENV_VAR}=(\\S+)`));
+  return match ? nonEmptyString(match[1]) : null;
+}
+
 /** Parses `lsof -nP -iTCP -sTCP:LISTEN -a -p <pid>` output for loopback/wildcard TCP
  * listening endpoints, preserving `127.0.0.1` vs `[::1]` while deduplicating by port
  * (preferring `127.0.0.1` when a dual-stack process binds both on the same port). */
@@ -638,10 +652,11 @@ function isCanonicalModelId(value: string | null): value is string {
   return value !== null && CANONICAL_MODEL_ID_RE.test(value);
 }
 
-/** Only a group whose identity is the all-Gemini scope can hold the shared
- * `fiveHour`/`weekly` slots. Versioned or model-specific groups ("Gemini 4",
- * "Gemini 4 Argon", `name: "gemini-4-argon"`) and partner pools stay in
- * `modelWindows`. A group that names Gemini outranks one that names nothing. */
+/** Only an all-Gemini group that names Gemini ("Gemini Models") can hold the
+ * shared `fiveHour`/`weekly` slots; a group with both cadences outranks one
+ * with a single cadence. Model-specific groups, partner pools, and unnamed or
+ * unrecognized groups ("Image generation") stay in `modelWindows`, where they
+ * still limit every Gemini model. */
 function primaryGeminiGroupScore(
   identity: ModelIdentity,
   texts: (string | null)[],
@@ -649,19 +664,35 @@ function primaryGeminiGroupScore(
   hasWeekly: boolean,
 ): number {
   if (identity.model !== null || identity.family !== ALL_GEMINI_IDENTITY.family) return -1;
-  const cadenceBonus = (hasFiveHour ? 2 : 0) + (hasWeekly ? 2 : 0);
-  const namesGemini = texts.some((t) => t !== null && /gemini/i.test(t));
-  return (namesGemini ? 100 : 90) + cadenceBonus;
+  if (!texts.some((t) => t !== null && /gemini/i.test(t))) return -1;
+  return 100 + (hasFiveHour ? 2 : 0) + (hasWeekly ? 2 : 0);
 }
 
+const DURATION_WORD = "\\d+(?:\\.\\d+)?(?:s|sec|secs|m|min|mins|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks)?";
+/** Words that only describe a quota's cadence or container ("Weekly quota",
+ * "5-hour session", "Free tier weekly"). Used for window keys only. */
+const GENERIC_LABEL_WORD_RE = new RegExp(
+  "^(?:" +
+    [
+      DURATION_WORD,
+      "weekly|week|weeks|daily|day|days|hourly|hour|hours|hr|hrs|five|seven",
+      "session|sessions|short|long|term|rolling",
+      "primary|secondary|default|standard|shared|core|pool|bucket|buckets|quota|quotas|limit|limits|window|windows",
+      "usage|request|requests|free|tier|remaining",
+    ].join("|") +
+    ")$",
+);
+
 /** A label that only describes the quota ("Weekly quota", "5-hour session",
- * "60s", "Free tier weekly") or repeats the group name adds no identity and
- * no key qualifier. */
+ * "60s", "Free tier weekly") or repeats the group name adds no key qualifier. */
 function isGenericBucketLabel(label: string, groupLabel: string): boolean {
   const lower = label.trim().toLowerCase();
   if (!lower) return true;
   if (lower === groupLabel.trim().toLowerCase()) return true;
-  return isQualifierOnlyText(label);
+  return lower
+    .split(/[^a-z0-9.]+/)
+    .filter(Boolean)
+    .every((t) => GENERIC_LABEL_WORD_RE.test(t));
 }
 
 function labelContainsGroup(label: string, groupLabel: string): boolean {
@@ -685,36 +716,57 @@ function labelAddsNothing(label: string | null, groupLabel: string): boolean {
   return false;
 }
 
-/** The group's identity: its canonical `name` and its display name, merged
- * (see `mergeModelIdentities`). A short display name ("Argon") extends the
- * name ("gemini-4"). A group that names no model family is a Gemini quota of
- * unknown scope, so it fails closed to every Gemini model; a partner pool
- * ("Claude / GPT") names no Gemini model. */
-function resolveGroupIdentity(rawName: string | null, displayName: string | null): ModelIdentity {
-  if ((mentionsOnlyPartnerFamily(rawName) || mentionsOnlyPartnerFamily(displayName)) &&
-    !/gemini/i.test(`${rawName ?? ""} ${displayName ?? ""}`)) {
-    return mergeModelIdentities([parseModelIdentity(rawName), parseModelIdentity(displayName)]);
-  }
-  const fromName = mergeModelIdentities([ALL_GEMINI_IDENTITY, parseModelIdentity(rawName)]);
-  return mergeModelIdentities([fromName, resolveLabelIdentity(displayName, fromName)]);
+/** A model the server reports for this account (from `GetUserStatus`
+ * `cascadeModelConfigData.groupedModels`). */
+export interface KnownModel {
+  id: string;
+  displayName: string | null;
 }
 
-/** Resolves one bucket to exactly one model identity. The bucket ID and then
- * the label each refine the group's identity: "gemini-4-argon-weekly" or
- * "Argon" inside "Gemini 4" is Argon, "(Lite)" inside "Gemini 4 Argon" is Lite,
- * and "Weekly" adds nothing. Sources that conflict widen to their common scope.
- * A bucket that names only a partner model ("Claude Sonnet weekly") takes that
- * identity whatever its group is. */
-function resolveBucketIdentity(
-  bucket: { label: string | null; id: string | null },
-  groupIdentity: ModelIdentity,
-): ModelIdentity {
-  const texts = [bucket.id, bucket.label];
-  if (texts.some(mentionsOnlyPartnerFamily) && !texts.some((t) => t !== null && /gemini/i.test(t))) {
-    return mergeModelIdentities(texts.map(parseModelIdentity));
+/** Reads the server's own model list from a `GetUserStatus` response. */
+export function extractKnownModels(body: GetUserStatusResponse | null | undefined): KnownModel[] {
+  const grouped = body?.userStatus?.cascadeModelConfigData?.groupedModels;
+  if (!grouped || typeof grouped !== "object" || Array.isArray(grouped)) return [];
+  const models: KnownModel[] = [];
+  for (const [rawId, info] of Object.entries(grouped)) {
+    const id = canonicalModelId(rawId);
+    if (id === null) continue;
+    models.push({ id, displayName: nonEmptyString(info?.displayName) });
   }
-  const withId = mergeModelIdentities([groupIdentity, resolveLabelIdentity(bucket.id, groupIdentity)]);
-  return mergeModelIdentities([withId, resolveLabelIdentity(bucket.label, withId)]);
+  return models;
+}
+
+function normalizeDisplayName(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/** The group's identity. A group is model-specific only when the server's own
+ * model list names it exactly and nothing in the group disagrees: its `name` is
+ * a listed model ID, or its display name is a listed model's display name
+ * ("Gemini 4 Argon"), and when both are present they name the same model. A
+ * name that is a model ID the server does not list ("gemini-4") also counts as
+ * a disagreement. A partner pool ("Claude and GPT models") limits no Gemini
+ * model. Every other group is a Gemini quota of unknown scope and limits every
+ * Gemini model. Labels are never parsed for model names. */
+function resolveGroupIdentity(
+  rawName: string | null,
+  displayName: string | null,
+  knownModels: readonly KnownModel[],
+): ModelIdentity {
+  const display = displayName === null ? null : normalizeDisplayName(displayName);
+  const fromDisplay =
+    display === null
+      ? null
+      : (knownModels.find((m) => m.displayName !== null && normalizeDisplayName(m.displayName) === display)?.id ?? null);
+  const fromName = canonicalModelId(rawName);
+  const ids = [fromName, fromDisplay].filter((id): id is string => id !== null);
+  if (ids.length > 0 && ids.every((id) => id === ids[0]) && knownModels.some((m) => m.id === ids[0])) {
+    return modelIdIdentity(ids[0]);
+  }
+  if (ids.every((id) => !id.startsWith("gemini-")) && mentionsOnlyPartnerFamily(`${rawName ?? ""} ${displayName ?? ""}`)) {
+    return NO_MODEL_IDENTITY;
+  }
+  return ALL_GEMINI_IDENTITY;
 }
 
 function formatModelWindowKey(
@@ -733,12 +785,9 @@ function formatModelWindowKey(
     // Non-primary groups represent a distinct model or pool (e.g. "Gemini 4 Argon",
     // "Gemini 4 Neon", "Claude / GPT"). Never drop the group identity.
     const bucketIsSpecific = bucketLabel !== null && !isGenericBucketLabel(bucketLabel, groupLabel);
-    // A bucket that repeats the group name or names a model by itself becomes
-    // the base label, so "Gemini 4 Argon" inside "Gemini 4 Models" keys as
-    // itself. A family word plus a cadence ("Gemini Weekly") stays a qualifier.
-    const bucketIncludesGroup =
-      bucketIsSpecific &&
-      (labelContainsGroup(bucketLabel, groupLabel) || parseModelIdentity(bucketLabel).model !== null);
+    // A bucket that repeats the group name becomes the base label, so
+    // "Gemini 4 Argon Weekly Limit" inside "Gemini 4 Argon" keys as itself.
+    const bucketIncludesGroup = bucketIsSpecific && labelContainsGroup(bucketLabel, groupLabel);
     const baseLabel = bucketIncludesGroup ? bucketLabel : groupLabel;
     const distinctBucketQualifier =
       bucketIsSpecific && !bucketIncludesGroup ? bucketLabel : null;
@@ -829,11 +878,14 @@ function buildExtra(
   };
 }
 
-/** Normalizes a structured `RetrieveUserQuotaSummary` payload into a `WindowSnapshot`. */
+/** Normalizes a structured `RetrieveUserQuotaSummary` payload into a
+ * `WindowSnapshot`. `knownModels` is the same server's model list (see
+ * `resolveGroupIdentity`); without it every Gemini group limits every Gemini model. */
 export function normalizeQuotaSummary(
   rawPayload: QuotaSummaryPayload,
   plan?: PlanMetadata | null,
   endpoint = "RetrieveUserQuotaSummary",
+  knownModels: readonly KnownModel[] = [],
 ): WindowSnapshot | null {
   if (!rawPayload || typeof rawPayload !== "object" || Array.isArray(rawPayload)) return null;
   const payload = rawPayload.response ?? rawPayload.summary ?? rawPayload;
@@ -886,7 +938,7 @@ export function normalizeQuotaSummary(
     if (parsedBuckets.length === 0) continue;
     const hasFiveHour = parsedBuckets.some((b) => b.cadence === "fiveHour");
     const hasWeekly = parsedBuckets.some((b) => b.cadence === "weekly");
-    const identity = resolveGroupIdentity(rawName, displayName);
+    const identity = resolveGroupIdentity(rawName, displayName, knownModels);
     parsedGroups.push({
       label: groupLabel,
       canonicalId,
@@ -924,31 +976,16 @@ export function normalizeQuotaSummary(
     }
   };
 
-  // In the shared primary group, a bucket is shared only when it resolves to
-  // the group's own all-Gemini identity: "Weekly", "Weekly requests", ID
-  // "gemini-free-tier-weekly". A bucket whose ID or label names a model or a
-  // versioned family ("gemini-4-neon-weekly", "Gemini 4 weekly"), or a partner
-  // model, is model-specific.
-  const isSharedPrimaryBucket = (bucket: ParsedBucket, groupIdentity: ModelIdentity): boolean => {
-    const identity = resolveBucketIdentity(bucket, groupIdentity);
-    return identity.model === null && identity.family === groupIdentity.family;
-  };
-
   const pickBestBucketIndex = (
     buckets: ParsedBucket[],
     cadence: "fiveHour" | "weekly",
     targetSeconds: number,
-    groupIdentity: ModelIdentity,
   ): number => {
     let bestIdx = -1;
     let bestDiff = Number.POSITIVE_INFINITY;
     for (let j = 0; j < buckets.length; j++) {
       const bucket = buckets[j]!;
       if (bucket.cadence !== cadence) continue;
-      // Never promote a model-specific bucket (e.g. "Gemini 4 Neon weekly" or
-      // bucketId "gemini-4-neon-weekly") inside the shared primary group into
-      // the shared fiveHour/weekly slot.
-      if (!isSharedPrimaryBucket(bucket, groupIdentity)) continue;
       const diff = bucket.durationSeconds !== null
         ? Math.abs(bucket.durationSeconds - targetSeconds)
         : Number.POSITIVE_INFINITY;
@@ -965,16 +1002,7 @@ export function normalizeQuotaSummary(
     groupBucketCount: number,
     isPrimaryGroup: boolean,
     groupLabel: string,
-    groupIdentity: ModelIdentity,
   ): string | null => {
-    if (bucket.id !== null && labelAddsNothing(bucket.label, groupLabel)) {
-      // A label that adds nothing ("Weekly", or none): show the bucket ID when
-      // it names a different model or family than the group
-      // ("gemini-4-argon-weekly").
-      const fromId = parseModelIdentity(bucket.id);
-      const idScope = fromId.model ?? (isVersionedFamily(fromId.family) ? fromId.family : null);
-      if (idScope !== null && idScope !== (groupIdentity.model ?? groupIdentity.family)) return bucket.id;
-    }
     if (bucket.label) return bucket.label;
     if (bucket.cadence === "unknown") {
       if (isPrimaryGroup || groupBucketCount > 1) {
@@ -987,7 +1015,7 @@ export function normalizeQuotaSummary(
 
   interface PendingEntry {
     baseKey: string;
-    /** Disambiguator for colliding keys: the identity slug, else the group's canonical name. */
+    /** Disambiguator for colliding keys: the model ID, else the group's canonical name. */
     identitySlug: string | null;
     identity: ModelIdentity;
     bucketId: string | null;
@@ -1000,16 +1028,17 @@ export function normalizeQuotaSummary(
     const displayGroupLabel = group.label || "Antigravity";
     const baseKey = formatModelWindowKey(
       displayGroupLabel,
-      fallbackBucketLabel(bucket, group.buckets.length, isPrimaryGroup, displayGroupLabel, group.identity),
+      fallbackBucketLabel(bucket, group.buckets.length, isPrimaryGroup, displayGroupLabel),
       bucket.cadence,
       bucket.durationSeconds,
       group.buckets.length,
       isPrimaryGroup,
     );
-    const identity = resolveBucketIdentity(bucket, group.identity);
+    // Every bucket has its group's identity; bucket labels and IDs never narrow it.
+    const identity = group.identity;
     pending.push({
       baseKey,
-      identitySlug: identity.model ?? identity.family ?? group.canonicalId,
+      identitySlug: identity.model ?? group.canonicalId,
       identity,
       bucketId: bucket.id,
       quota: bucket.quota,
@@ -1019,8 +1048,8 @@ export function normalizeQuotaSummary(
   for (let i = 0; i < parsedGroups.length; i++) {
     const group = parsedGroups[i]!;
     if (i === primaryIndex) {
-      const bestFiveHourIdx = pickBestBucketIndex(group.buckets, "fiveHour", FIVE_HOUR_TARGET_SECONDS, group.identity);
-      const bestWeeklyIdx = pickBestBucketIndex(group.buckets, "weekly", WEEKLY_TARGET_SECONDS, group.identity);
+      const bestFiveHourIdx = pickBestBucketIndex(group.buckets, "fiveHour", FIVE_HOUR_TARGET_SECONDS);
+      const bestWeeklyIdx = pickBestBucketIndex(group.buckets, "weekly", WEEKLY_TARGET_SECONDS);
       if (bestFiveHourIdx >= 0) fiveHour = group.buckets[bestFiveHourIdx]!.quota;
       if (bestWeeklyIdx >= 0) weekly = group.buckets[bestWeeklyIdx]!.quota;
       group.buckets.forEach((bucket, j) => {
@@ -1147,11 +1176,16 @@ function normalizeModelEntries(
       entry.modelId && distinctIds && distinctIds.size > 1
         ? `${entry.label} [${entry.modelId}]`
         : entry.label;
-    // The model ID and the display label describe the same model: the narrower
-    // one wins when they agree ("gemini-4" + "Gemini 4 Neon" is Neon), and
-    // their common scope when they conflict. Each entry here is one model, not
-    // a pool, so an entry that names no model family limits nothing.
-    const identity = mergeModelIdentities([parseModelIdentity(entry.modelId), parseModelIdentity(entry.label)]);
+    // Only the exact model ID identifies the model; the display label is never
+    // parsed. An entry without a model ID is a Gemini quota of unknown scope
+    // (unless it names only a partner model), so it limits every Gemini model.
+    const fromId = modelIdIdentity(entry.modelId);
+    const identity =
+      fromId.model !== null
+        ? fromId
+        : mentionsOnlyPartnerFamily(entry.label)
+          ? NO_MODEL_IDENTITY
+          : ALL_GEMINI_IDENTITY;
     const existing = modelWindows[key];
     insertModelWindow(modelWindows, key, entry.quota);
     if (!existing || entry.quota.usedPercent > existing.usedPercent) {
@@ -1185,7 +1219,11 @@ export function normalizeModelConfigs(
     const usedPercent = remainingFractionToUsedPercent(cfg.quotaInfo?.remainingFraction);
     if (usedPercent === null) continue;
     const resetsAt = parseTimestamp(cfg.quotaInfo?.resetTime);
-    const modelId = nonEmptyString(cfg.modelOrAlias?.model) ?? nonEmptyString(cfg.modelOrAlias?.alias) ?? "";
+    const modelId =
+      nonEmptyString(cfg.modelId) ??
+      nonEmptyString(cfg.modelOrAlias?.model) ??
+      nonEmptyString(cfg.modelOrAlias?.alias) ??
+      "";
     const label = nonEmptyString(cfg.label) ?? prettifyModelId(modelId);
     entries.push({
       modelId,
@@ -1496,15 +1534,18 @@ async function queryLocalTarget(
 
   if (summaryRes.ok) {
     const payload = summaryRes.body as QuotaSummaryPayload;
-    if (!isRpcErrorCode(payload.code)) {
+    if (!isRpcErrorCode(payload.code) && normalizeQuotaSummary(payload, null, "RetrieveUserQuotaSummary")) {
+      // GetUserStatus on the same target supplies the plan and the server's model
+      // list, which decides which summary groups are model-specific (best-effort).
       let plan: PlanMetadata | null = null;
-      const baseSnapshot = normalizeQuotaSummary(payload, null, "RetrieveUserQuotaSummary");
+      let knownModels: KnownModel[] = [];
+      const statusRes = await postLoopbackRpc(request, scheme, host, port, "GetUserStatus", csrfToken, deadline);
+      if (statusRes.ok && !isRpcErrorCode((statusRes.body as GetUserStatusResponse).code)) {
+        plan = extractPlanFromUserStatus(statusRes.body as GetUserStatusResponse);
+        knownModels = extractKnownModels(statusRes.body as GetUserStatusResponse);
+      }
+      const baseSnapshot = normalizeQuotaSummary(payload, null, "RetrieveUserQuotaSummary", knownModels);
       if (baseSnapshot) {
-        // Enrich plan/tier from GetUserStatus on the same working loopback target (best-effort).
-        const statusRes = await postLoopbackRpc(request, scheme, host, port, "GetUserStatus", csrfToken, deadline);
-        if (statusRes.ok && !isRpcErrorCode((statusRes.body as GetUserStatusResponse).code)) {
-          plan = extractPlanFromUserStatus(statusRes.body as GetUserStatusResponse);
-        }
         return {
           snapshot: {
             ...baseSnapshot,
@@ -1604,6 +1645,16 @@ async function collectFromLocalServer(
     }
     const lsofEndpoints = lsof.exitCode === 0 ? parseListeningEndpoints(lsof.stdout) : [];
 
+    // Antigravity 2.34+ (`--standalone`) passes the CSRF token in the environment.
+    let csrfToken = proc.csrfToken;
+    if (!csrfToken && proc.kind === "language_server" && remainingMs() > 0) {
+      const env = await runCommand(
+        ["ps", "eww", "-o", "command=", "-p", String(proc.pid)],
+        Math.min(SUBPROCESS_TIMEOUT_MS, remainingMs()),
+      );
+      if (env.exitCode === 0) csrfToken = extractCsrfTokenFromEnvironment(env.stdout);
+    }
+
     interface LocalTarget {
       host: LoopbackHost;
       port: number;
@@ -1622,7 +1673,7 @@ async function collectFromLocalServer(
         host: endpoint.host,
         port: endpoint.port,
         schemes: ["https", "http"],
-        csrfToken: proc.csrfToken,
+        csrfToken,
       });
     }
 
@@ -1633,7 +1684,7 @@ async function collectFromLocalServer(
         host: extEndpoint?.host ?? "127.0.0.1",
         port: proc.extensionServerPort,
         schemes: ["http", "https"],
-        csrfToken: proc.extensionServerCsrfToken ?? proc.csrfToken,
+        csrfToken: proc.extensionServerCsrfToken ?? csrfToken,
       });
     }
 
