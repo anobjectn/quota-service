@@ -229,7 +229,9 @@ const TRAILING_CADENCE_WORDS =
  * by stripping only recognized trailing cadence/duration/quota qualifiers while
  * preserving variant names such as "Lite" or "(Lite)". */
 function normalizeModelMatchKey(value: string): string {
-  const withoutTrailingCadenceParens = value.trim().replace(TRAILING_CADENCE_PARENS, "");
+  // Drop the collector's collision disambiguators first ("[background]", "#2").
+  const withoutDisambiguators = value.trim().replace(/(?:\s+(?:\[[^\]]*\]|#\d+))+$/, "");
+  const withoutTrailingCadenceParens = withoutDisambiguators.replace(TRAILING_CADENCE_PARENS, "");
   return withoutTrailingCadenceParens
     .toLowerCase()
     .replace(/[()[\]]+/g, " ")
@@ -261,10 +263,11 @@ function extractStringRecord(raw: unknown): Record<string, string> {
 
 /** For Antigravity candidates, the binding constraint is the MINIMUM headroom
  * across any shared limits (`fiveHour`, `weekly`) AND any `modelWindows` entry
- * targeting that specific candidate model — matched exclusively by canonical
- * model ID in `snapshot.extra.modelWindowIds` when present, or by exact
- * normalized label / `snapshot.extra.modelWindowGroups` hint (stripping only
- * recognized trailing cadence/duration tags) when no canonical ID is recorded.
+ * targeting that specific candidate model — matched when its canonical model ID
+ * (`snapshot.extra.modelWindowIds`), its exact normalized label, or its group
+ * hint (`snapshot.extra.modelWindowGroups`, a label or a canonical group ID)
+ * names the candidate. Labels drop only collision disambiguators and recognized
+ * trailing cadence/duration tags, so sibling variants such as "(Lite)" differ.
  * Unrelated models' buckets are never borrowed: if neither shared limits nor a
  * matching model window exist for a candidate, its headroom is `null` (unknown)
  * so ranking falls back honestly to a measured tier. */
@@ -293,11 +296,15 @@ function computeAntigravityCandidateHeadroom(
       if (!w || !Number.isFinite(w.usedPercent)) continue;
       const recordedId = windowIds[name];
       const recordedGroup = windowGroups[name];
+      // Any one identity binds: a window whose model ID, exact label, or group
+      // hint names this candidate constrains it. Matching fails closed: an
+      // exhausted window is never hidden because one of its identities differs.
       const matches =
-        recordedId != null
-          ? targetIds.has(normalizeCanonicalModelId(recordedId))
-          : normalizeModelMatchKey(name) === targetKey ||
-            (recordedGroup != null && normalizeModelMatchKey(recordedGroup) === targetKey);
+        (recordedId != null && targetIds.has(normalizeCanonicalModelId(recordedId))) ||
+        normalizeModelMatchKey(name) === targetKey ||
+        (recordedGroup != null &&
+          (normalizeModelMatchKey(recordedGroup) === targetKey ||
+            targetIds.has(normalizeCanonicalModelId(recordedGroup))));
       if (!matches) continue;
 
       const headroom = 100 - w.usedPercent;

@@ -424,6 +424,22 @@ describe("Antigravity normalization helpers", () => {
       });
     }
 
+    // A generic "Weekly" display label does not hide a model-specific bucketId,
+    // in either bucket order.
+    for (const reversed of [false, true]) {
+      const buckets = [
+        { displayName: "Weekly", bucketId: "gemini-4-neon-weekly", window: "604800s", remainingFraction: 0 },
+        { displayName: "Weekly", bucketId: "shared-weekly", window: "604800s", remainingFraction: 0.9 },
+      ];
+      const labelledById = normalizeQuotaSummary({
+        groups: [{ displayName: "Gemini", buckets: reversed ? buckets.reverse() : buckets }],
+      });
+      expect(labelledById!.weekly).toEqual({ usedPercent: 10, resetsAt: null });
+      expect(labelledById!.modelWindows).toEqual({
+        "gemini-4-neon-weekly": { usedPercent: 100, resetsAt: null },
+      });
+    }
+
     // Structured groups with distinct canonical names sharing displayName ("Gemini 4" or "Gemini")
     // stay disambiguated across groups regardless of order and never promote to shared weekly.
     for (const displayName of ["Gemini 4", "Gemini"]) {

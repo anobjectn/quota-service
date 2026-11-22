@@ -694,6 +694,21 @@ function isSharedPrimaryBucketLabel(label: string | null, groupLabel: string): b
   return false;
 }
 
+const MODEL_FAMILY_TOKEN_RE = /\b(?:gemini|claude|gpt|oss)\b/i;
+
+/** True when a bucket label (or bucket ID) names its own model rather than
+ * qualifying the enclosing group: e.g. "Gemini 4 Argon" inside the family group
+ * "Gemini 4" or "Gemini 4 Models", or bucket ID "gemini-4-neon-weekly" inside the
+ * shared "Gemini" group. Group name plus a generic remainder ("Gemini 4 Argon
+ * 5-hour" inside "Gemini 4 Argon") and plain qualifiers ("Interactive") do not. */
+function bucketNamesOwnModel(label: string | null, groupLabel: string): boolean {
+  if (label === null || isSharedPrimaryBucketLabel(label, groupLabel)) return false;
+  if (labelContainsGroup(label, groupLabel)) {
+    return label.trim().length > groupLabel.trim().length;
+  }
+  return MODEL_FAMILY_TOKEN_RE.test(label.replace(/[-_]+/g, " "));
+}
+
 function formatModelWindowKey(
   groupLabel: string,
   bucketLabel: string | null,
@@ -710,7 +725,11 @@ function formatModelWindowKey(
     // Non-primary groups represent a distinct model or pool (e.g. "Gemini 4 Argon",
     // "Gemini 4 Neon", "Claude / GPT"). Never drop the group identity.
     const bucketIsSpecific = bucketLabel !== null && !isGenericBucketLabel(bucketLabel, groupLabel);
-    const bucketIncludesGroup = bucketIsSpecific && labelContainsGroup(bucketLabel, groupLabel);
+    // A bucket that repeats the group name or names its own model becomes the
+    // base label, so "Gemini 4 Argon" inside "Gemini 4 Models" keys as itself.
+    const bucketIncludesGroup =
+      bucketIsSpecific &&
+      (labelContainsGroup(bucketLabel, groupLabel) || bucketNamesOwnModel(bucketLabel, groupLabel));
     const baseLabel = bucketIncludesGroup ? bucketLabel : groupLabel;
     const distinctBucketQualifier =
       bucketIsSpecific && !bucketIncludesGroup ? bucketLabel : null;
@@ -884,10 +903,21 @@ export function normalizeQuotaSummary(
   const modelWindowIds: Record<string, string> = {};
   const modelWindowGroups: Record<string, string> = {};
 
+  // A bucket ID that names a model ("gemini-4-neon-weekly") identifies the
+  // bucket even when its display label is generic ("Weekly").
+  const primaryBucketModelId = (bucket: ParsedBucket, groupLabel: string): string | null => {
+    if (bucket.id === null) return null;
+    if (bucket.label === null) {
+      return isSharedPrimaryBucketLabel(bucket.id, groupLabel) ? null : bucket.id;
+    }
+    return isSharedPrimaryBucketLabel(bucket.label, groupLabel) && bucketNamesOwnModel(bucket.id, groupLabel)
+      ? bucket.id
+      : null;
+  };
+
   const isSharedPrimaryBucket = (bucket: ParsedBucket, groupLabel: string): boolean => {
-    if (bucket.label !== null) return isSharedPrimaryBucketLabel(bucket.label, groupLabel);
-    if (bucket.id !== null) return isSharedPrimaryBucketLabel(bucket.id, groupLabel);
-    return true;
+    if (primaryBucketModelId(bucket, groupLabel) !== null) return false;
+    return isSharedPrimaryBucketLabel(bucket.label, groupLabel);
   };
 
   const pickBestBucketIndex = (
@@ -922,10 +952,11 @@ export function normalizeQuotaSummary(
     isPrimaryGroup: boolean,
     groupLabel: string,
   ): string | null => {
-    if (bucket.label) return bucket.label;
-    if (isPrimaryGroup && bucket.id && !isSharedPrimaryBucketLabel(bucket.id, groupLabel)) {
-      return bucket.id;
+    if (isPrimaryGroup) {
+      const modelId = primaryBucketModelId(bucket, groupLabel);
+      if (modelId) return modelId;
     }
+    if (bucket.label) return bucket.label;
     if (bucket.cadence === "unknown") {
       if (isPrimaryGroup || groupBucketCount > 1) {
         return bucket.id ?? (bucket.durationSeconds !== null ? formatDurationLabel(bucket.durationSeconds) : null);
@@ -994,19 +1025,16 @@ export function normalizeQuotaSummary(
         group.buckets.length,
         false,
       );
-      // Only attach a free-text group display hint when the bucket does not
-      // already name a more specific model inside a broader family group
-      // (e.g. "Gemini 4 Argon" inside family group "Gemini 4").
-      const bucketNamesMoreSpecificModel =
-        resolvedBucketLabel !== null &&
-        !isGenericBucketLabel(resolvedBucketLabel, displayGroupLabel) &&
-        labelContainsGroup(resolvedBucketLabel, displayGroupLabel) &&
-        resolvedBucketLabel.trim().length > displayGroupLabel.trim().length;
-      const groupHint =
-        !group.canonicalId && group.label && !bucketNamesMoreSpecificModel ? group.label : null;
+      // One identity per bucket: the group's canonical ID is the bucket's model
+      // ID only when the bucket does not name its own model. Otherwise (a family
+      // group such as `name: "gemini-4"` holding "Gemini 4 Argon"), the group
+      // identity is recorded only as a hint, and matching uses the bucket label.
+      const ownModel = bucketNamesOwnModel(resolvedBucketLabel, displayGroupLabel);
+      const canonicalId = ownModel ? null : group.canonicalId;
+      const groupHint = canonicalId ? null : (group.canonicalId ?? (group.label || null));
       pendingNonPrimary.push({
         baseKey,
-        canonicalId: group.canonicalId,
+        canonicalId,
         groupHint,
         bucketId: bucket.id,
         quota: bucket.quota,
@@ -1372,8 +1400,12 @@ async function defaultRunCommand(argv: string[], timeoutMs: number): Promise<Ant
     // Prevent an unhandled rejection if killing the process after timeout aborts stream reads.
     completed.catch(() => undefined);
 
-    const outcome = await Promise.race([completed, timedOut]);
-    if (timer) clearTimeout(timer);
+    let outcome: Awaited<typeof completed> | "timeout";
+    try {
+      outcome = await Promise.race([completed, timedOut]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
     if (outcome === "timeout") {
       return { exitCode: 124, stdout: "", stderr: `${argv[0]} timed out after ${timeoutMs}ms` };
     }

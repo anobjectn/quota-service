@@ -493,6 +493,73 @@ test("recommendation matches canonical model IDs when display labels differ and 
   expect(frontierSummary.recommendation?.headroomPercent).toBe(90);
 });
 
+test("recommendation binds an exhausted per-model bucket whatever the enclosing group's name, label, or ID suffix", () => {
+  const now = Date.now();
+  const recommend = (groups: Parameters<typeof normalizeQuotaSummary>[0]["groups"]) => {
+    const snapshot = normalizeQuotaSummary({ groups });
+    expect(snapshot).not.toBeNull();
+    return recommendModel("feature", {
+      generatedAt: now,
+      providers: [{
+        provider: "antigravity",
+        status: "ok",
+        source: "antigravity_local",
+        dataAgeMs: 0,
+        capturedAt: now,
+        snapshot,
+        manualEntries: [],
+      }],
+    }).recommendation;
+  };
+  const shared = { displayName: "Gemini", buckets: [{ displayName: "Session", remainingFraction: 0.9 }] };
+  const familyBuckets = [
+    { displayName: "Gemini 4 Argon", remainingFraction: 0 },
+    { displayName: "Gemini 4 Neon", remainingFraction: 0.5 },
+  ];
+  const exhaustedArgonGroups = [
+    // Family group with a canonical name.
+    { name: "gemini-4", displayName: "Gemini 4", buckets: familyBuckets },
+    // Family group whose label does not prefix the model names.
+    { displayName: "Gemini 4 Models", buckets: familyBuckets },
+    // Model group IDs with suffixes the estimator does not strip.
+    { name: "gemini-4-argon-exp", displayName: "Gemini 4 Argon", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] },
+    { name: "gemini-4-argon-pool", displayName: "Gemini 4 Argon", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] },
+    // Two Argon buckets disambiguated by bucketId inside a family group.
+    {
+      displayName: "Gemini 4",
+      buckets: [
+        { bucketId: "interactive", displayName: "Gemini 4 Argon", window: "18000s", remainingFraction: 0.9 },
+        { bucketId: "background", displayName: "Gemini 4 Argon", window: "18000s", remainingFraction: 0 },
+      ],
+    },
+    // A leaf model group whose bucket repeats the model name plus a qualifier.
+    { name: "gemini-4-argon", displayName: "Argon", buckets: [{ displayName: "Gemini 4 Argon Interactive", remainingFraction: 0 }] },
+  ];
+  for (const group of exhaustedArgonGroups) {
+    const rec = recommend([shared, group]);
+    expect(rec?.model).toBe("Gemini 3.8 Flash");
+    expect(rec?.headroomPercent).toBe(90);
+  }
+
+  // A family ID is not recorded as the model ID of the buckets it holds.
+  const named = normalizeQuotaSummary({ groups: [shared, exhaustedArgonGroups[0]!] });
+  expect(named!.extra?.modelWindowIds).toBeUndefined();
+  expect(named!.extra?.modelWindowGroups).toEqual({ "Gemini 4 Argon": "gemini-4", "Gemini 4 Neon": "gemini-4" });
+
+  // Without the shared group, the exhausted bucket still measures Argon at 0%.
+  const disambiguated = recommend([exhaustedArgonGroups[4]!]);
+  expect(disambiguated?.model).toBe("Gemini 4 Argon");
+  expect(disambiguated?.headroomPercent).toBe(0);
+
+  // An exhausted sibling variant still does not constrain the base model.
+  const lite = recommend([
+    shared,
+    { displayName: "Gemini 4", buckets: [{ displayName: "Gemini 4 Argon (Lite)", remainingFraction: 0 }] },
+  ]);
+  expect(lite?.model).toBe("Gemini 4 Argon");
+  expect(lite?.headroomPercent).toBe(90);
+});
+
 test("resets emit model:<name> windows only for Antigravity, preserving existing Anthropic output", () => {
   const db = testDb();
   const now = Date.now();
