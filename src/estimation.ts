@@ -37,6 +37,14 @@
 
 import type { Provider } from "./types";
 import type { UsageReport, ProviderReport } from "./present";
+import {
+  coerceModelIdentity,
+  hasModelIdentity,
+  identityConstrainsModel,
+  NO_MODEL_IDENTITY,
+  parseModelIdentity,
+  type ModelIdentity,
+} from "./model-identity";
 
 export type TaskProfile = "small_fix" | "feature" | "large_refactor" | "research";
 
@@ -220,57 +228,40 @@ function minPrimaryWindowHeadroom(
   return { headroomPercent: minHeadroom, constraint };
 }
 
-const TRAILING_CADENCE_PARENS =
-  /\s*\(\s*(?:(?:5\s*h(?:our|r)?s?|five[\s-]*hour|session|weekly|week|7\s*d(?:ay)?s?|seven[\s-]*day|\d+(?:\.\d+)?\s*[smhd]|quota|limit|window)[\s,-]*)+\)\s*$/i;
-const TRAILING_CADENCE_WORDS =
-  /(?:\s+(?:5\s*h(?:our|r)?s?|five\s+hour|session|weekly|week|7\s*d(?:ay)?s?|seven\s+day|\d+(?:\.\d+)?[smhd]|quota|limit|window))+$/i;
-
-/** Normalizes a label-only model window key (when no canonical ID is recorded)
- * by stripping only recognized trailing cadence/duration/quota qualifiers while
- * preserving variant names such as "Lite" or "(Lite)". */
-function normalizeModelMatchKey(value: string): string {
-  // Drop the collector's collision disambiguators first ("[background]", "#2").
-  const withoutDisambiguators = value.trim().replace(/(?:\s+(?:\[[^\]]*\]|#\d+))+$/, "");
-  const withoutTrailingCadenceParens = withoutDisambiguators.replace(TRAILING_CADENCE_PARENS, "");
-  return withoutTrailingCadenceParens
-    .toLowerCase()
-    .replace(/[()[\]]+/g, " ")
-    .replace(/[-_\s]+/g, " ")
-    .trim()
-    .replace(TRAILING_CADENCE_WORDS, "")
-    .trim();
-}
-
-function normalizeCanonicalModelId(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/^models\//, "")
-    .replace(/[_\s]+/g, "-")
-    .replace(/(?:-(?:low|medium|med|high|xhigh|thinking|tiered|preview|latest|\d{3,8}))+$/g, "");
-}
-
-function extractStringRecord(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const out: Record<string, string> = {};
-  for (const [label, val] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof val === "string" && val.trim()) {
-      out[label] = val.trim();
-    }
+/** Returns each model window's identity. Snapshots from the Antigravity
+ * collector carry one resolved identity per window in
+ * `extra.modelWindowIdentity`, and that record is authoritative: a window it
+ * lists without an identity binds no candidate. Snapshots saved before that
+ * field existed fall back to parsing the window's recorded model ID, then its
+ * key (with collision disambiguators such as "[id]" or "#2" removed). */
+function modelWindowIdentityLookup(extra: Record<string, unknown> | undefined): (name: string) => ModelIdentity {
+  const typed = extra?.modelWindowIdentity;
+  if (typed && typeof typed === "object" && !Array.isArray(typed)) {
+    const record = typed as Record<string, unknown>;
+    return (name) => (Object.hasOwn(record, name) ? coerceModelIdentity(record[name]) : NO_MODEL_IDENTITY);
   }
-  return out;
+  const legacyIds = extra?.modelWindowIds;
+  const ids =
+    legacyIds && typeof legacyIds === "object" && !Array.isArray(legacyIds)
+      ? (legacyIds as Record<string, unknown>)
+      : {};
+  return (name) => {
+    const recorded = Object.hasOwn(ids, name) ? ids[name] : undefined;
+    const fromId = typeof recorded === "string" ? parseModelIdentity(recorded) : NO_MODEL_IDENTITY;
+    if (hasModelIdentity(fromId)) return fromId;
+    return parseModelIdentity(name.trim().replace(/(?:\s+(?:\[[^\]]*\]|#\d+))+$/, ""));
+  };
 }
 
 /** For Antigravity candidates, the binding constraint is the MINIMUM headroom
  * across any shared limits (`fiveHour`, `weekly`) AND any `modelWindows` entry
- * targeting that specific candidate model — matched when its canonical model ID
- * (`snapshot.extra.modelWindowIds`), its exact normalized label, or its group
- * hint (`snapshot.extra.modelWindowGroups`, a label or a canonical group ID)
- * names the candidate. Labels drop only collision disambiguators and recognized
- * trailing cadence/duration tags, so sibling variants such as "(Lite)" differ.
- * Unrelated models' buckets are never borrowed: if neither shared limits nor a
- * matching model window exist for a candidate, its headroom is `null` (unknown)
- * so ranking falls back honestly to a measured tier. */
+ * whose resolved identity (see `modelWindowIdentityLookup`) limits that
+ * candidate: a model window limits only the same model, so a sibling variant
+ * such as "gemini-4-argon-lite" never limits "gemini-4-argon"; a family-only
+ * window ("gemini-4") limits every model in that family. Unrelated models'
+ * buckets are never borrowed: if neither shared limits nor a matching model
+ * window exist for a candidate, its headroom is `null` (unknown) so ranking
+ * falls back honestly to a measured tier. */
 function computeAntigravityCandidateHeadroom(
   report: ProviderReport,
   option: ModelOption,
@@ -287,25 +278,15 @@ function computeAntigravityCandidateHeadroom(
 
   const modelWindows = report.snapshot.modelWindows;
   if (modelWindows) {
-    const targetKey = normalizeModelMatchKey(option.model);
-    const targetIds = new Set((option.modelIds ?? []).map(normalizeCanonicalModelId));
-    const windowIds = extractStringRecord(report.snapshot.extra?.modelWindowIds);
-    const windowGroups = extractStringRecord(report.snapshot.extra?.modelWindowGroups);
+    const identityOf = modelWindowIdentityLookup(report.snapshot.extra);
+    const candidates = [...(option.modelIds ?? []), option.model]
+      .map(parseModelIdentity)
+      .filter(hasModelIdentity);
 
     for (const [name, w] of Object.entries(modelWindows)) {
       if (!w || !Number.isFinite(w.usedPercent)) continue;
-      const recordedId = windowIds[name];
-      const recordedGroup = windowGroups[name];
-      // Any one identity binds: a window whose model ID, exact label, or group
-      // hint names this candidate constrains it. Matching fails closed: an
-      // exhausted window is never hidden because one of its identities differs.
-      const matches =
-        (recordedId != null && targetIds.has(normalizeCanonicalModelId(recordedId))) ||
-        normalizeModelMatchKey(name) === targetKey ||
-        (recordedGroup != null &&
-          (normalizeModelMatchKey(recordedGroup) === targetKey ||
-            targetIds.has(normalizeCanonicalModelId(recordedGroup))));
-      if (!matches) continue;
+      const identity = identityOf(name);
+      if (!candidates.some((candidate) => identityConstrainsModel(identity, candidate))) continue;
 
       const headroom = 100 - w.usedPercent;
       if (minHeadroom === null || headroom < minHeadroom) {
@@ -342,19 +323,16 @@ function computeHeadroom(report: ProviderReport): ProviderHeadroom {
     ));
     // When Antigravity only reports per-model buckets (e.g. per-model fallback
     // when cadence cannot be mapped to 5h/weekly), summarize provider-level
-    // headroom from Gemini modelWindows (checked by label, canonical ID, or group).
+    // headroom from Gemini modelWindows (checked by label or resolved identity).
     if (minHeadroom === null && report.provider === "antigravity" && report.snapshot.modelWindows) {
-      const windowIds = extractStringRecord(report.snapshot.extra?.modelWindowIds);
-      const windowGroups = extractStringRecord(report.snapshot.extra?.modelWindowGroups);
+      const identityOf = modelWindowIdentityLookup(report.snapshot.extra);
       const entries = Object.entries(report.snapshot.modelWindows).filter(
         ([, w]) => w != null && Number.isFinite(w.usedPercent),
       );
-      const preferred = entries.filter(
-        ([name]) =>
-          /gemini/i.test(name) ||
-          /gemini/i.test(windowIds[name] ?? "") ||
-          /gemini/i.test(windowGroups[name] ?? ""),
-      );
+      const preferred = entries.filter(([name]) => {
+        const identity = identityOf(name);
+        return /gemini/i.test(name) || /^gemini/.test(identity.model ?? identity.family ?? "");
+      });
       const sourceEntries = preferred.length > 0 ? preferred : entries;
       for (const [name, w] of sourceEntries) {
         const headroom = 100 - w.usedPercent;

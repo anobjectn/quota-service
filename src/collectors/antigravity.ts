@@ -10,6 +10,13 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { finiteNumber, parseInstant } from "../lib/time";
+import {
+  hasModelIdentity,
+  NO_MODEL_IDENTITY,
+  parseModelIdentity,
+  resolveLabelIdentity,
+  type ModelIdentity,
+} from "../model-identity";
 import type { CollectorResult, WindowQuota, WindowSnapshot } from "../types";
 
 export const ANTIGRAVITY_POLL_FLOOR_MS = 60_000;
@@ -694,19 +701,40 @@ function isSharedPrimaryBucketLabel(label: string | null, groupLabel: string): b
   return false;
 }
 
-const MODEL_FAMILY_TOKEN_RE = /\b(?:gemini|claude|gpt|oss)\b/i;
+/** The group's own identity: its canonical `name` when that names a model,
+ * else its display name; a family-only identity ("gemini-4") when neither names
+ * a model. */
+function resolveGroupIdentity(rawName: string | null, displayName: string | null): ModelIdentity {
+  const fromName = parseModelIdentity(rawName);
+  const fromDisplay = parseModelIdentity(displayName);
+  if (fromName.model) return fromName;
+  if (fromDisplay.model) return fromDisplay;
+  if (fromName.family) return fromName;
+  return fromDisplay;
+}
 
-/** True when a bucket label (or bucket ID) names its own model rather than
- * qualifying the enclosing group: e.g. "Gemini 4 Argon" inside the family group
- * "Gemini 4" or "Gemini 4 Models", or bucket ID "gemini-4-neon-weekly" inside the
- * shared "Gemini" group. Group name plus a generic remainder ("Gemini 4 Argon
- * 5-hour" inside "Gemini 4 Argon") and plain qualifiers ("Interactive") do not. */
-function bucketNamesOwnModel(label: string | null, groupLabel: string): boolean {
-  if (label === null || isSharedPrimaryBucketLabel(label, groupLabel)) return false;
-  if (labelContainsGroup(label, groupLabel)) {
-    return label.trim().length > groupLabel.trim().length;
+/** Resolves one bucket to exactly one model identity, in this order: a bucket ID
+ * that names a model, then a bucket label that names a model (a short label
+ * such as "Argon" or "(Lite)" extends the group's identity), then the group's
+ * model, then the most specific family found. A label that only repeats the
+ * group name or adds a cadence ("Weekly", "Gemini 4 Argon 5-hour") adds nothing. */
+function resolveBucketIdentity(
+  bucket: { label: string | null; id: string | null },
+  groupIdentity: ModelIdentity,
+  groupLabel: string,
+): ModelIdentity {
+  const fromId = parseModelIdentity(bucket.id);
+  if (fromId.model) return fromId;
+  const fromLabel =
+    bucket.label !== null && !isSharedPrimaryBucketLabel(bucket.label, groupLabel)
+      ? resolveLabelIdentity(bucket.label, groupIdentity)
+      : NO_MODEL_IDENTITY;
+  if (fromLabel.model) return fromLabel;
+  if (groupIdentity.model) return groupIdentity;
+  for (const candidate of [fromLabel, fromId, groupIdentity]) {
+    if (candidate.family) return { model: null, family: candidate.family };
   }
-  return MODEL_FAMILY_TOKEN_RE.test(label.replace(/[-_]+/g, " "));
+  return NO_MODEL_IDENTITY;
 }
 
 function formatModelWindowKey(
@@ -725,11 +753,12 @@ function formatModelWindowKey(
     // Non-primary groups represent a distinct model or pool (e.g. "Gemini 4 Argon",
     // "Gemini 4 Neon", "Claude / GPT"). Never drop the group identity.
     const bucketIsSpecific = bucketLabel !== null && !isGenericBucketLabel(bucketLabel, groupLabel);
-    // A bucket that repeats the group name or names its own model becomes the
-    // base label, so "Gemini 4 Argon" inside "Gemini 4 Models" keys as itself.
+    // A bucket that repeats the group name or names a model by itself becomes
+    // the base label, so "Gemini 4 Argon" inside "Gemini 4 Models" keys as
+    // itself. A family word plus a cadence ("Gemini Weekly") stays a qualifier.
     const bucketIncludesGroup =
       bucketIsSpecific &&
-      (labelContainsGroup(bucketLabel, groupLabel) || bucketNamesOwnModel(bucketLabel, groupLabel));
+      (labelContainsGroup(bucketLabel, groupLabel) || parseModelIdentity(bucketLabel).model !== null);
     const baseLabel = bucketIncludesGroup ? bucketLabel : groupLabel;
     const distinctBucketQualifier =
       bucketIsSpecific && !bucketIncludesGroup ? bucketLabel : null;
@@ -843,6 +872,7 @@ export function normalizeQuotaSummary(
   interface ParsedGroup {
     label: string;
     canonicalId: string | null;
+    identity: ModelIdentity;
     buckets: ParsedBucket[];
     score: number;
   }
@@ -879,6 +909,7 @@ export function normalizeQuotaSummary(
     parsedGroups.push({
       label: groupLabel,
       canonicalId,
+      identity: resolveGroupIdentity(rawName, displayName),
       buckets: parsedBuckets,
       score: primaryGeminiGroupScore(groupLabel, hasFiveHour, hasWeekly, rawName),
     });
@@ -900,23 +931,36 @@ export function normalizeQuotaSummary(
   let fiveHour: WindowQuota | null = null;
   let weekly: WindowQuota | null = null;
   const modelWindows: Record<string, WindowQuota> = {};
-  const modelWindowIds: Record<string, string> = {};
-  const modelWindowGroups: Record<string, string> = {};
+  const modelWindowIdentity: Record<string, ModelIdentity> = {};
 
-  // A bucket ID that names a model ("gemini-4-neon-weekly") identifies the
-  // bucket even when its display label is generic ("Weekly").
-  const primaryBucketModelId = (bucket: ParsedBucket, groupLabel: string): string | null => {
+  // Record a window and its identity together, keeping the tighter constraint
+  // (and that bucket's identity) when two buckets land on the same key.
+  const recordModelWindow = (key: string, quota: WindowQuota, identity: ModelIdentity): void => {
+    const existing = modelWindows[key];
+    insertModelWindow(modelWindows, key, quota);
+    if (!existing || quota.usedPercent > existing.usedPercent) {
+      modelWindowIdentity[key] = { model: identity.model, family: identity.family };
+    }
+  };
+
+  // In the shared primary group, a bucket ID that names a model or family
+  // ("gemini-4-neon-weekly") makes the bucket model-specific even when its
+  // label is generic ("Weekly"). Other IDs ("gemini-free-tier-weekly",
+  // "prod_quota_1") do not. Returns the ID to show as the bucket label.
+  const primaryBucketIdLabel = (bucket: ParsedBucket, groupLabel: string): string | null => {
     if (bucket.id === null) return null;
     if (bucket.label === null) {
-      return isSharedPrimaryBucketLabel(bucket.id, groupLabel) ? null : bucket.id;
+      return isSharedPrimaryBucketLabel(bucket.id, groupLabel) && !hasModelIdentity(parseModelIdentity(bucket.id))
+        ? null
+        : bucket.id;
     }
-    return isSharedPrimaryBucketLabel(bucket.label, groupLabel) && bucketNamesOwnModel(bucket.id, groupLabel)
+    return isSharedPrimaryBucketLabel(bucket.label, groupLabel) && hasModelIdentity(parseModelIdentity(bucket.id))
       ? bucket.id
       : null;
   };
 
   const isSharedPrimaryBucket = (bucket: ParsedBucket, groupLabel: string): boolean => {
-    if (primaryBucketModelId(bucket, groupLabel) !== null) return false;
+    if (primaryBucketIdLabel(bucket, groupLabel) !== null) return false;
     return isSharedPrimaryBucketLabel(bucket.label, groupLabel);
   };
 
@@ -951,10 +995,16 @@ export function normalizeQuotaSummary(
     groupBucketCount: number,
     isPrimaryGroup: boolean,
     groupLabel: string,
+    groupIdentity: ModelIdentity,
   ): string | null => {
     if (isPrimaryGroup) {
-      const modelId = primaryBucketModelId(bucket, groupLabel);
-      if (modelId) return modelId;
+      const idLabel = primaryBucketIdLabel(bucket, groupLabel);
+      if (idLabel) return idLabel;
+    } else if (bucket.id !== null && isSharedPrimaryBucketLabel(bucket.label, groupLabel)) {
+      // A generic label ("Weekly") in a family group: show the bucket ID when it
+      // names a different model than the group ("gemini-4-argon-weekly").
+      const idModel = parseModelIdentity(bucket.id).model;
+      if (idModel !== null && idModel !== groupIdentity.model) return bucket.id;
     }
     if (bucket.label) return bucket.label;
     if (bucket.cadence === "unknown") {
@@ -968,8 +1018,9 @@ export function normalizeQuotaSummary(
 
   interface PendingNonPrimaryEntry {
     baseKey: string;
-    canonicalId: string | null;
-    groupHint: string | null;
+    /** Disambiguator for colliding keys: the identity slug, else the group's canonical name. */
+    identitySlug: string | null;
+    identity: ModelIdentity;
     bucketId: string | null;
     quota: WindowQuota;
   }
@@ -999,13 +1050,13 @@ export function normalizeQuotaSummary(
         const bucket = group.buckets[j]!;
         const key = formatModelWindowKey(
           displayGroupLabel,
-          fallbackBucketLabel(bucket, group.buckets.length, true, displayGroupLabel),
+          fallbackBucketLabel(bucket, group.buckets.length, true, displayGroupLabel, group.identity),
           bucket.cadence,
           bucket.durationSeconds,
           group.buckets.length,
           true,
         );
-        insertModelWindow(modelWindows, key, bucket.quota);
+        recordModelWindow(key, bucket.quota, resolveBucketIdentity(bucket, group.identity, displayGroupLabel));
       }
       continue;
     }
@@ -1016,6 +1067,7 @@ export function normalizeQuotaSummary(
         group.buckets.length,
         false,
         displayGroupLabel,
+        group.identity,
       );
       const baseKey = formatModelWindowKey(
         displayGroupLabel,
@@ -1025,36 +1077,30 @@ export function normalizeQuotaSummary(
         group.buckets.length,
         false,
       );
-      // One identity per bucket: the group's canonical ID is the bucket's model
-      // ID only when the bucket does not name its own model. Otherwise (a family
-      // group such as `name: "gemini-4"` holding "Gemini 4 Argon"), the group
-      // identity is recorded only as a hint, and matching uses the bucket label.
-      const ownModel = bucketNamesOwnModel(resolvedBucketLabel, displayGroupLabel);
-      const canonicalId = ownModel ? null : group.canonicalId;
-      const groupHint = canonicalId ? null : (group.canonicalId ?? (group.label || null));
+      const identity = resolveBucketIdentity(bucket, group.identity, displayGroupLabel);
       pendingNonPrimary.push({
         baseKey,
-        canonicalId,
-        groupHint,
+        identitySlug: identity.model ?? identity.family ?? group.canonicalId,
+        identity,
         bucketId: bucket.id,
         quota: bucket.quota,
       });
     }
   }
 
-  // Pass 1: disambiguate colliding base keys across distinct canonical group IDs
+  // Pass 1: disambiguate colliding base keys across distinct identities
   // deterministically (independent of group order).
-  const groupIdsByBaseKey = new Map<string, Set<string>>();
+  const slugsByBaseKey = new Map<string, Set<string>>();
   for (const entry of pendingNonPrimary) {
-    if (!entry.canonicalId) continue;
-    const set = groupIdsByBaseKey.get(entry.baseKey) ?? new Set<string>();
-    set.add(entry.canonicalId.toLowerCase());
-    groupIdsByBaseKey.set(entry.baseKey, set);
+    if (!entry.identitySlug) continue;
+    const set = slugsByBaseKey.get(entry.baseKey) ?? new Set<string>();
+    set.add(entry.identitySlug.toLowerCase());
+    slugsByBaseKey.set(entry.baseKey, set);
   }
   const afterGroupKeys = pendingNonPrimary.map((entry) => {
-    const distinctIds = groupIdsByBaseKey.get(entry.baseKey);
-    if (entry.canonicalId && distinctIds && distinctIds.size > 1) {
-      return `${entry.baseKey} [${entry.canonicalId}]`;
+    const distinctSlugs = slugsByBaseKey.get(entry.baseKey);
+    if (entry.identitySlug && distinctSlugs && distinctSlugs.size > 1) {
+      return `${entry.baseKey} [${entry.identitySlug}]`;
     }
     return entry.baseKey;
   });
@@ -1087,21 +1133,11 @@ export function normalizeQuotaSummary(
       seenOrdinals.set(key, ord);
       key = `${key} #${ord}`;
     }
-    const existing = modelWindows[key];
-    insertModelWindow(modelWindows, key, entry.quota);
-    if (!existing || entry.quota.usedPercent > existing.usedPercent) {
-      if (entry.canonicalId) {
-        modelWindowIds[key] = entry.canonicalId;
-      } else if (entry.groupHint) {
-        modelWindowGroups[key] = entry.groupHint;
-      }
-    }
+    recordModelWindow(key, entry.quota, entry.identity);
   }
 
-  const extraFields: Record<string, unknown> = {
-    ...(Object.keys(modelWindowIds).length > 0 ? { modelWindowIds } : {}),
-    ...(Object.keys(modelWindowGroups).length > 0 ? { modelWindowGroups } : {}),
-  };
+  const extraFields: Record<string, unknown> =
+    Object.keys(modelWindowIdentity).length > 0 ? { modelWindowIdentity } : {};
 
   const snapshot: WindowSnapshot = {
     kind: "window",
@@ -1161,22 +1197,25 @@ function normalizeModelEntries(
   }
 
   const modelWindows: Record<string, WindowQuota> = {};
-  const modelWindowIds: Record<string, string> = {};
+  const modelWindowIdentity: Record<string, ModelIdentity> = {};
   for (const entry of entries) {
     const distinctIds = idsByLabel.get(entry.label);
     const key =
       entry.modelId && distinctIds && distinctIds.size > 1
         ? `${entry.label} [${entry.modelId}]`
         : entry.label;
+    // The model ID is the identity; the display label is used only without one.
+    const fromId = parseModelIdentity(entry.modelId);
+    const identity = hasModelIdentity(fromId) ? fromId : parseModelIdentity(entry.label);
     const existing = modelWindows[key];
     insertModelWindow(modelWindows, key, entry.quota);
-    if (entry.modelId && (!existing || entry.quota.usedPercent > existing.usedPercent)) {
-      modelWindowIds[key] = entry.modelId;
+    if (!existing || entry.quota.usedPercent > existing.usedPercent) {
+      modelWindowIdentity[key] = { model: identity.model, family: identity.family };
     }
   }
 
   const extraFields: Record<string, unknown> =
-    Object.keys(modelWindowIds).length > 0 ? { modelWindowIds } : {};
+    Object.keys(modelWindowIdentity).length > 0 ? { modelWindowIdentity } : {};
 
   const snapshot: WindowSnapshot = {
     kind: "window",

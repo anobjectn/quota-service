@@ -348,10 +348,10 @@ describe("Antigravity normalization helpers", () => {
       "Gemini 4 Argon (1h)": { usedPercent: 100, resetsAt: null },
       "Claude / GPT (1h)": { usedPercent: 20, resetsAt: null },
     });
-    expect(multiGroup!.extra?.modelWindowGroups).toEqual({
-      "Gemini 4 Neon (weekly)": "Gemini 4 Neon",
-      "Gemini 4 Argon (1h)": "Gemini 4 Argon",
-      "Claude / GPT (1h)": "Claude / GPT",
+    expect(multiGroup!.extra?.modelWindowIdentity).toEqual({
+      "Gemini 4 Neon (weekly)": { model: "gemini-4-neon", family: "gemini-4" },
+      "Gemini 4 Argon (1h)": { model: "gemini-4-argon", family: "gemini-4" },
+      "Claude / GPT (1h)": { model: null, family: null },
     });
 
     // Distinct named buckets sharing a cadence inside one non-primary group keep independent reset schedules.
@@ -371,9 +371,9 @@ describe("Antigravity normalization helpers", () => {
       "Gemini 4 Argon (Interactive, 5h)": { usedPercent: 10, resetsAt: Date.parse(t1) },
       "Gemini 4 Argon (Background, 5h)": { usedPercent: 80, resetsAt: Date.parse(t2) },
     });
-    expect(sameCadence!.extra?.modelWindowGroups).toEqual({
-      "Gemini 4 Argon (Interactive, 5h)": "Gemini 4 Argon",
-      "Gemini 4 Argon (Background, 5h)": "Gemini 4 Argon",
+    expect(sameCadence!.extra?.modelWindowIdentity).toEqual({
+      "Gemini 4 Argon (Interactive, 5h)": { model: "gemini-4-argon", family: "gemini-4" },
+      "Gemini 4 Argon (Background, 5h)": { model: "gemini-4-argon", family: "gemini-4" },
     });
 
     // Two unlabeled, ID-less buckets sharing a cadence stay distinct via stable ordinal suffixes.
@@ -454,9 +454,9 @@ describe("Antigravity normalization helpers", () => {
         [`${displayName} (weekly) [gemini-4-argon]`]: { usedPercent: 100, resetsAt: Date.parse(t1) },
         [`${displayName} (weekly) [gemini-4-neon]`]: { usedPercent: 10, resetsAt: Date.parse(t2) },
       });
-      expect(dupGroups!.extra?.modelWindowIds).toEqual({
-        [`${displayName} (weekly) [gemini-4-argon]`]: "gemini-4-argon",
-        [`${displayName} (weekly) [gemini-4-neon]`]: "gemini-4-neon",
+      expect(dupGroups!.extra?.modelWindowIdentity).toEqual({
+        [`${displayName} (weekly) [gemini-4-argon]`]: { model: "gemini-4-argon", family: "gemini-4" },
+        [`${displayName} (weekly) [gemini-4-neon]`]: { model: "gemini-4-neon", family: "gemini-4" },
       });
     }
   });
@@ -473,13 +473,13 @@ describe("Antigravity normalization helpers", () => {
       "Gemini 4 [gemini-4-argon]": { usedPercent: 10, resetsAt: null },
       "Gemini 4 [gemini-4-neon]": { usedPercent: 100, resetsAt: null },
     });
-    expect(snap!.extra?.modelWindowIds).toEqual({
-      "Gemini 4 [gemini-4-argon]": "gemini-4-argon",
-      "Gemini 4 [gemini-4-neon]": "gemini-4-neon",
+    expect(snap!.extra?.modelWindowIdentity).toEqual({
+      "Gemini 4 [gemini-4-argon]": { model: "gemini-4-argon", family: "gemini-4" },
+      "Gemini 4 [gemini-4-neon]": { model: "gemini-4-neon", family: "gemini-4" },
     });
   });
 
-  test("keeps per-model fallback horizons (2d, 4d, 20d) stably in modelWindows and records canonical modelWindowIds", () => {
+  test("keeps per-model fallback horizons (2d, 4d, 20d) stably in modelWindows and records each window's model identity", () => {
     for (const days of [2, 4, 20]) {
       const reset = new Date(NOW + days * 24 * 3600 * 1000).toISOString();
       const snap = normalizeAvailableModels({
@@ -496,8 +496,8 @@ describe("Antigravity normalization helpers", () => {
       expect(snap!.modelWindows).toEqual({
         "Gemini 3 Pro": { usedPercent: 60, resetsAt: Date.parse(reset) },
       });
-      expect(snap!.extra?.modelWindowIds).toEqual({
-        "Gemini 3 Pro": "gemini-3-pro",
+      expect(snap!.extra?.modelWindowIdentity).toEqual({
+        "Gemini 3 Pro": { model: "gemini-3-pro", family: "gemini-3" },
       });
     }
   });
