@@ -253,9 +253,10 @@ function modelWindowIdentityLookup(extra: Record<string, unknown> | undefined): 
 /** For Antigravity candidates, the binding constraint is the MINIMUM headroom
  * across any shared limits (`fiveHour`, `weekly`) AND any `modelWindows` entry
  * whose identity (see `modelWindowIdentityLookup`) limits that candidate: a
- * model window limits only the same exact model ID, so a sibling such as
- * "gemini-4-argon-lite" never limits "gemini-4-argon"; an all-Gemini window
- * limits every Gemini candidate. Unrelated models'
+ * model window limits only the candidate with the same exact model ID; a
+ * Gemini model ID no candidate holds (a variant such as "gemini-4-argon-lite"
+ * or a "-preview" rename) and an all-Gemini window limit every Gemini
+ * candidate; partner and image windows limit none. Unrelated models'
  * buckets are never borrowed: if neither shared limits nor a matching model
  * window exist for a candidate, its headroom is `null` (unknown) so ranking
  * falls back honestly to a measured tier. */
@@ -325,8 +326,9 @@ function computeHeadroom(report: ProviderReport): ProviderHeadroom {
         ([, w]) => w != null && Number.isFinite(w.usedPercent),
       );
       const preferred = entries.filter(([name]) => identityOf(name).family === ALL_GEMINI_IDENTITY.family);
-      const sourceEntries = preferred.length > 0 ? preferred : entries;
-      for (const [name, w] of sourceEntries) {
+      // Only windows that limit Gemini text models count; an image- or
+      // partner-only snapshot leaves provider headroom unknown.
+      for (const [name, w] of preferred) {
         const headroom = 100 - w.usedPercent;
         if (minHeadroom === null || headroom < minHeadroom) {
           minHeadroom = headroom;

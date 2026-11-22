@@ -219,30 +219,39 @@ For Antigravity, each window records the models it limits. Free-text labels
 are never read for model or pool names. The supported inputs are:
 
 - **Exact model IDs.** A per-model entry's `modelId` (effort suffixes such as
-  `-high` and `-001` releases removed) limits only that model.
+  `-high` and `-001` releases removed, and a whole `models/` or
+  `projects/.../models/` resource prefix) limits only that model. An alias is
+  never read as a model ID.
 - **Summary groups the server names.** A `RetrieveUserQuotaSummary` group
   whose `name` is a model ID in the same server's `GetUserStatus` model list,
-  or whose display name exactly one listed model has (for example the
-  "Gemini 4 Argon" group), limits only that model. When the group has both a
+  or whose display name only one listed model ID has (for example the
+  "Gemini 4 Argon" group), limits only that model. Every listed entry counts
+  when checking that, including entries whose key is not a model ID. When the group has both a
   name and a display name, both must give the same answer.
-- **Real pool names.** A group or entry whose whole name is "Claude and GPT
-  models" (the partner pool) limits no Gemini model. One whose whole name is
-  "Image generation", or whose model ID is an image model (`imagen-*`, or an
-  ID with an `image` segment such as `gemini-3-pro-image-preview`), limits
-  image generation only, so using up image quota never changes the text
-  recommendation. Names are compared whole, ignoring case and spacing.
+- **Pool names.** A group or entry whose whole supplied name is "Claude and
+  GPT models" (the partner pool in real 2.34 payloads) limits no Gemini model.
+  One whose whole name is "Image generation", or whose model ID is an image
+  model (`imagen-*`, or an ID with an `image` segment such as
+  `gemini-3-pro-image-preview`), limits image generation only, so using up
+  image quota never changes the text recommendation. "Image generation" is
+  provisional: Antigravity 2.34 reports no separate image quota group, so no
+  payload has shown the real name yet. Names are compared whole, ignoring
+  case and spacing, and only when the payload supplied them (a label made up
+  from a model ID never counts).
 
 Everything else limits every Gemini text model, by design. That includes the
 shared "Gemini Models" group, a group whose fields disagree, a display name
 that two listed models share, a Gemini model ID none of the recommended
 models has (such as `gemini-4-argon-preview`), any other pool name (even one
 that contains the partner or image words, such as "Text and image
-generation"), and windows saved without an identity record. This fails
+generation"), windows saved without an identity record, and malformed
+identity records. This fails
 closed: an unrecognized pool that runs out makes every Gemini text model look
 exhausted, the Cloud Code fallback (which has no model list) treats the Argon
 group as shared, and on Google AI Pro Argon's separate weekly quota is still
 limited by the shared Gemini windows too. New pool names are added only from a
-captured payload.
+captured payload. Provider-level headroom counts only windows that limit Gemini
+text models; with none, it is unknown.
 
 ### Warp: manual entry for add-on credits
 

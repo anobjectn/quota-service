@@ -38,12 +38,17 @@ export const IMAGE_GENERATION_IDENTITY: ModelIdentity = Object.freeze({ model: n
 const MODEL_ID_RE = /^(?:gemini|imagen|claude|gpt)-[a-z0-9][a-z0-9.-]*$/;
 /** Image-generation model IDs: "imagen-4", or an "image" segment ("gemini-3-pro-image-preview"). */
 const IMAGE_MODEL_ID_RE = /^imagen-|-image(?:-|$)/;
+/** A resource-path prefix made only of path segments, ending in "models/". */
+const RESOURCE_PREFIX_RE = /^(?:[a-z0-9._-]+\/)*?models\//;
 /** Thinking-effort suffixes on Antigravity model IDs ("gemini-4-neon-high"). */
 const EFFORT_SUFFIX_RE = /-(?:minimal|low|medium|high|xhigh)$/;
 /** Numbered releases ("models/gemini-4-argon-001"). */
 const RELEASE_SUFFIX_RE = /-\d{3}$/;
-/** Whole pool names seen in real Antigravity payloads, normalized (lowercase,
- * single spaces). Extend these only from a captured payload. */
+/** Whole pool names, normalized (lowercase, single spaces). "Claude and GPT
+ * models" is the partner pool in real Antigravity 2.34 payloads. "Image
+ * generation" is provisional: no captured payload has shown an image quota
+ * group yet (2.34 reports none), so replace or extend it from the first
+ * capture that does. */
 const PARTNER_POOL_NAMES: ReadonlySet<string> = new Set(["claude and gpt models"]);
 const IMAGE_POOL_NAMES: ReadonlySet<string> = new Set(["image generation"]);
 
@@ -53,9 +58,9 @@ const IMAGE_POOL_NAMES: ReadonlySet<string> = new Set(["image generation"]);
  * opaque IDs ("MODEL_PLACEHOLDER_M532") are not model IDs. */
 export function canonicalModelId(value: string | null | undefined): string | null {
   if (typeof value !== "string") return null;
-  let id = value.trim().toLowerCase();
-  const slash = id.lastIndexOf("models/");
-  if (slash !== -1) id = id.slice(slash + "models/".length);
+  // Only a whole resource path ("models/x", "projects/p/models/x") loses its
+  // prefix; "All models/imagen-4" is a name, not a path.
+  const id = value.trim().toLowerCase().replace(RESOURCE_PREFIX_RE, "");
   if (!MODEL_ID_RE.test(id)) return null;
   const stripped = id.replace(EFFORT_SUFFIX_RE, "").replace(RELEASE_SUFFIX_RE, "");
   // "gemini-high" or "imagen-001" leave only the prefix: not a model ID.
@@ -107,19 +112,19 @@ export function identityConstrainsModel(window: ModelIdentity, candidate: ModelI
   return window.family !== null && window.family === candidate.family;
 }
 
-/** Reads a stored identity record value. Anything malformed means "no identity";
- * a stored Gemini family scope ("gemini-4", from older snapshots) widens to
- * every Gemini model; a stored "image" family is an image pool. */
+/** Reads a stored identity record value. The explicit "no identity" record
+ * `{model: null, family: null}` (a partner pool) is kept; a stored model is
+ * read as a model ID (display strings are not IDs); a stored "image" family
+ * is an image pool; anything else, malformed or unrecognized (including old
+ * family scopes such as "gemini-4"), limits every Gemini text model. */
 export function coerceModelIdentity(raw: unknown): ModelIdentity {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return NO_MODEL_IDENTITY;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return ALL_GEMINI_IDENTITY;
   const { model, family } = raw as { model?: unknown; family?: unknown };
-  if (typeof model === "string" && model.trim()) {
-    const id = model.trim().toLowerCase();
-    return { model: id, family: modelIdFamily(id) };
+  if (model === null && family === null) return NO_MODEL_IDENTITY;
+  if (typeof model === "string") {
+    const identity = modelIdIdentity(model);
+    return identity.model !== null ? identity : ALL_GEMINI_IDENTITY;
   }
-  if (typeof family !== "string") return NO_MODEL_IDENTITY;
-  const scope = family.trim().toLowerCase();
-  if (scope === IMAGE_GENERATION_IDENTITY.family) return IMAGE_GENERATION_IDENTITY;
-  if (scope.startsWith("gemini")) return ALL_GEMINI_IDENTITY;
-  return NO_MODEL_IDENTITY;
+  if (model === null && family === IMAGE_GENERATION_IDENTITY.family) return IMAGE_GENERATION_IDENTITY;
+  return ALL_GEMINI_IDENTITY;
 }

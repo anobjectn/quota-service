@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { saveResetCredits, saveSnapshot, setManualEntry } from "../src/db";
-import { collectAntigravity, normalizeAvailableModels, normalizeModelConfigs, normalizeQuotaSummary } from "../src/collectors/antigravity";
+import { collectAntigravity, extractKnownModels, normalizeAvailableModels, normalizeModelConfigs, normalizeQuotaSummary, type KnownModel } from "../src/collectors/antigravity";
 import { recommendModel } from "../src/estimation";
 import { buildResetsReport, buildUsageReport, type ProviderReport, type UsageReport } from "../src/present";
 import type { CollectorResult, Provider } from "../src/types";
@@ -355,6 +355,25 @@ test("per-model entries are identified only by their exact model ID", () => {
       }
     }
   }
+  // A literal label equal to a generated key never merges two identities, in either order.
+  for (const order of [0, 1]) {
+    const entries = [
+      { label: "Foo", modelId: "claude-opus-5-5", quotaInfo: { remainingFraction: 0 } },
+      { label: "Foo", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
+      { label: "Foo [claude-opus-5-5]", quotaInfo: { remainingFraction: 0.01 } },
+      { label: "Foo [unscoped]", modelId: "gemini-4-neon", quotaInfo: { remainingFraction: 1 } },
+    ];
+    expect(recommendFrom(normalizeModelConfigs(order ? entries.reverse() : entries))).toBe("Gemini 4 Argon@1");
+  }
+  // A label generated from an unknown ID is not a pool name, and an alias is not a model ID.
+  expect(recommendFrom(normalizeModelConfigs([
+    { modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
+    { modelId: "claude_and_gpt_models", quotaInfo: { remainingFraction: 0 } },
+  ]))).toBe("Gemini 4 Argon@0");
+  expect(recommendFrom(normalizeModelConfigs([
+    { label: "Argon", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
+    { label: "Standard", modelOrAlias: { alias: "gemini-4-neon" }, quotaInfo: { remainingFraction: 0 } },
+  ]))).toBe("Gemini 4 Argon@0");
   // Image-generation models and pools limit no Gemini text model.
   expect(recommendFrom(normalizeModelConfigs([
     { label: "Gemini 4 Argon", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
@@ -392,7 +411,7 @@ test("per-model entries are identified only by their exact model ID", () => {
 
 test("a summary group is model-specific only when the server's model list names it", () => {
   const shared = { displayName: "Gemini Models", buckets: [{ bucketId: "gemini-5h", window: "5h", remainingFraction: 0.9 }] };
-  const summary = (group: unknown, known = KNOWN_MODELS) =>
+  const summary = (group: unknown, known: readonly KnownModel[] = KNOWN_MODELS) =>
     normalizeQuotaSummary({ groups: [shared, group] as never }, null, undefined, known);
 
   // The group's display name or name matches exactly one listed model (and no
@@ -456,7 +475,11 @@ test("a summary group is model-specific only when the server's model list names 
       { id: "gemini-4-neon", displayName: "Gemini 4" },
       { id: "gemini-4-argon", displayName: "Gemini 4" },
     ]),
+    summary({ displayName: "Standard", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }, extractKnownModels({
+      userStatus: { cascadeModelConfigData: { groupedModels: { "gemini-4-neon": { displayName: "Standard" }, MODEL_PLACEHOLDER_M418: { displayName: "Standard" } } } },
+    })),
     ...[
+      "All models/imagen-4", "Gemini models/claude-opus-5-5", "All models/gemini-4-argon",
       "Claude / GPT", "Sonnet / Opus", "All models including Claude and GPT", "Claude and Flash", "1P and 3P models",
       "Gemini image generation", "Imagen", "Image generation and text", "Text & image generation", "Gemini + Imagen",
       "All models (including image generation)",
@@ -607,6 +630,18 @@ test("recommendation treats a window without a recorded identity as limiting eve
   } as UsageReport);
   expect(image.recommendation?.headroomPercent).toBe(90);
   expect(image.headroomByProvider[0]?.headroomPercent).toBe(90);
+  // With no window that limits Gemini text models, provider headroom is unknown.
+  for (const only of [
+    normalizeModelConfigs([{ label: "Imagen 4", modelId: "imagen-4.0-generate-001", quotaInfo: { remainingFraction: 0 } }]),
+    normalizeModelConfigs([{ label: "Claude Opus 5.5", modelId: "claude-opus-5-5", quotaInfo: { remainingFraction: 0 } }]),
+    normalizeQuotaSummary({ groups: [{ displayName: "Image generation", buckets: [{ window: "weekly", remainingFraction: 0 }] }] }),
+  ]) {
+    const result = recommendModel("feature", {
+      generatedAt: 0,
+      providers: [{ provider: "antigravity", status: "ok", source: "antigravity_local", dataAgeMs: 0, capturedAt: 0, manualEntries: [], snapshot: only }],
+    } as UsageReport);
+    expect(result.headroomByProvider[0]?.headroomPercent).toBeNull();
+  }
 });
 
 test("Tactic A reads the Antigravity 2.34 CSRF token from the environment and resolves the real payload", async () => {

@@ -696,24 +696,13 @@ function labelContainsGroup(label: string, groupLabel: string): boolean {
   return normLabel === normGroup || normLabel.includes(normGroup);
 }
 
-/** True when a bucket label adds nothing to its group: no label, a generic
- * label, or the group name plus generic words ("Gemini weekly"). */
-function labelAddsNothing(label: string | null, groupLabel: string): boolean {
-  if (label === null) return true;
-  if (isGenericBucketLabel(label, groupLabel)) return true;
-  const normLabel = label.toLowerCase().replace(/[-_\s]+/g, " ").trim();
-  const normGroup = groupLabel.toLowerCase().replace(/[-_\s]+/g, " ").trim();
-  if (normGroup && normLabel.startsWith(`${normGroup} `)) {
-    const remainder = normLabel.slice(normGroup.length).trim();
-    if (isGenericBucketLabel(remainder, groupLabel)) return true;
-  }
-  return false;
-}
-
 /** A model the server reports for this account (from `GetUserStatus`
  * `cascadeModelConfigData.groupedModels`). */
 export interface KnownModel {
-  id: string;
+  /** Canonical model ID, or null when the server's key is not one
+   * ("MODEL_PLACEHOLDER_M418"). Such entries still count when checking
+   * whether a display name is unique. */
+  id: string | null;
   displayName: string | null;
 }
 
@@ -723,11 +712,14 @@ export function extractKnownModels(body: GetUserStatusResponse | null | undefine
   if (!grouped || typeof grouped !== "object" || Array.isArray(grouped)) return [];
   const models: KnownModel[] = [];
   for (const [rawId, info] of Object.entries(grouped)) {
-    const id = canonicalModelId(rawId);
-    if (id === null) continue;
-    models.push({ id, displayName: nonEmptyString(info?.displayName) });
+    if (!rawId.trim()) continue;
+    models.push({ id: canonicalModelId(rawId), displayName: nonEmptyString(info?.displayName) });
   }
   return models;
+}
+
+function sameIdentity(a: ModelIdentity, b: ModelIdentity): boolean {
+  return a.model === b.model && a.family === b.family;
 }
 
 function normalizeDisplayName(value: string): string {
@@ -738,8 +730,9 @@ function normalizeDisplayName(value: string): string {
  * - a model ID the server lists: that exact model;
  * - an image model ID ("imagen-4"): image generation; any other model ID the
  *   server does not list ("gemini-4", "claude-gpt-pool"): every Gemini model;
- * - a display name that exactly one listed model has: that model; a display
- *   name that two or more listed models share: every Gemini model;
+ * - a display name that only one listed model ID has: that model; a display
+ *   name that two or more listed entries with different IDs share, or that an
+ *   entry without a model ID has, means every Gemini model;
  * - otherwise the whole-name pool rule (`poolNameIdentity`). */
 function resolveGroupFieldIdentity(value: string, knownModels: readonly KnownModel[]): ModelIdentity {
   const id = canonicalModelId(value);
@@ -748,12 +741,11 @@ function resolveGroupFieldIdentity(value: string, knownModels: readonly KnownMod
     return modelIdIdentity(id).family === IMAGE_GENERATION_IDENTITY.family ? IMAGE_GENERATION_IDENTITY : ALL_GEMINI_IDENTITY;
   }
   const display = normalizeDisplayName(value);
-  const matches = new Set(
-    knownModels.filter((m) => m.displayName !== null && normalizeDisplayName(m.displayName) === display).map((m) => m.id),
-  );
-  if (matches.size === 1) return modelIdIdentity([...matches][0]);
-  if (matches.size > 1) return ALL_GEMINI_IDENTITY;
-  return poolNameIdentity(value);
+  const matches = knownModels.filter((m) => m.displayName !== null && normalizeDisplayName(m.displayName) === display);
+  if (matches.length === 0) return poolNameIdentity(value);
+  const ids = new Set(matches.map((m) => m.id));
+  const [only] = [...ids];
+  return ids.size === 1 && only ? modelIdIdentity(only) : ALL_GEMINI_IDENTITY;
 }
 
 /** The group's identity: every field present must give the same identity
@@ -1125,6 +1117,9 @@ export function normalizeQuotaSummary(
 
 interface NormalizedModelEntry {
   modelId: string;
+  /** The display name the payload supplied, or null when `label` is generated
+   * from the model ID. Only a supplied name is matched against pool names. */
+  suppliedLabel: string | null;
   label: string;
   quota: WindowQuota;
 }
@@ -1158,12 +1153,11 @@ function normalizeModelEntries(
 ): WindowSnapshot | null {
   if (entries.length === 0) return null;
 
-  // Disambiguate colliding display labels across distinct canonical model IDs
+  // Disambiguate colliding display labels across distinct model IDs
   // deterministically (independent of payload order) so neither model's quota
-  // or canonical ID is lost, while duplicate buckets for the same modelId
-  // still collapse onto the tighter constraint.
-  // An entry without a model ID counts as its own ID (""), so it never shares
-  // a key, and so an identity, with a same-label entry that has one.
+  // or ID is lost, while duplicate buckets for the same modelId still collapse
+  // onto the tighter constraint. An entry without a model ID counts as its own
+  // ID (""), so it never shares a key with a same-label entry that has one.
   const idsByLabel = new Map<string, Set<string>>();
   for (const entry of entries) {
     const set = idsByLabel.get(entry.label) ?? new Set<string>();
@@ -1175,14 +1169,20 @@ function normalizeModelEntries(
   const modelWindowIdentity: Record<string, ModelIdentity> = {};
   for (const entry of entries) {
     const distinctIds = idsByLabel.get(entry.label);
-    const key =
+    const preferredKey =
       distinctIds && distinctIds.size > 1 ? `${entry.label} [${entry.modelId || "unscoped"}]` : entry.label;
     // Only the exact model ID identifies the model; the display label is never
     // parsed. An entry without a model ID is a Gemini quota of unknown scope
-    // (unless its whole label is a known pool name), so it limits every Gemini
-    // model.
+    // (unless its supplied name is a known pool name), so it limits every
+    // Gemini model.
     const fromId = modelIdIdentity(entry.modelId);
-    const identity = fromId.model !== null ? fromId : poolNameIdentity(entry.label);
+    const identity = fromId.model !== null ? fromId : poolNameIdentity(entry.suppliedLabel);
+    // A generated key can equal another entry's literal label ("Foo [id]"):
+    // windows with different identities never share a key.
+    let key = preferredKey;
+    for (let n = 2; key in modelWindowIdentity && !sameIdentity(modelWindowIdentity[key]!, identity); n++) {
+      key = `${preferredKey} #${n}`;
+    }
     const existing = modelWindows[key];
     insertModelWindow(modelWindows, key, entry.quota);
     if (!existing || entry.quota.usedPercent > existing.usedPercent) {
@@ -1216,14 +1216,13 @@ export function normalizeModelConfigs(
     const usedPercent = remainingFractionToUsedPercent(cfg.quotaInfo?.remainingFraction);
     if (usedPercent === null) continue;
     const resetsAt = parseTimestamp(cfg.quotaInfo?.resetTime);
-    const modelId =
-      nonEmptyString(cfg.modelId) ??
-      nonEmptyString(cfg.modelOrAlias?.model) ??
-      nonEmptyString(cfg.modelOrAlias?.alias) ??
-      "";
-    const label = nonEmptyString(cfg.label) ?? prettifyModelId(modelId);
+    // An alias names the entry but never identifies its model.
+    const modelId = nonEmptyString(cfg.modelId) ?? nonEmptyString(cfg.modelOrAlias?.model) ?? "";
+    const suppliedLabel = nonEmptyString(cfg.label);
+    const label = suppliedLabel ?? prettifyModelId(modelId || (nonEmptyString(cfg.modelOrAlias?.alias) ?? ""));
     entries.push({
       modelId,
+      suppliedLabel,
       label,
       quota: { usedPercent, resetsAt },
     });
@@ -1244,9 +1243,11 @@ export function normalizeAvailableModels(
     const usedPercent = remainingFractionToUsedPercent(info.quotaInfo?.remainingFraction);
     if (usedPercent === null) continue;
     const resetsAt = parseTimestamp(info.quotaInfo?.resetTime);
-    const label = nonEmptyString(info.displayName) ?? nonEmptyString(info.label) ?? prettifyModelId(modelId);
+    const suppliedLabel = nonEmptyString(info.displayName) ?? nonEmptyString(info.label);
+    const label = suppliedLabel ?? prettifyModelId(modelId);
     entries.push({
       modelId,
+      suppliedLabel,
       label,
       quota: { usedPercent, resetsAt },
     });
@@ -1267,9 +1268,11 @@ export function normalizeCloudQuotaBuckets(
     if (usedPercent === null) continue;
     const resetsAt = parseTimestamp(bucket.resetTime);
     const modelId = nonEmptyString(bucket.modelId) ?? "";
-    const label = nonEmptyString(bucket.displayName) ?? prettifyModelId(modelId);
+    const suppliedLabel = nonEmptyString(bucket.displayName);
+    const label = suppliedLabel ?? prettifyModelId(modelId);
     entries.push({
       modelId,
+      suppliedLabel,
       label,
       quota: { usedPercent, resetsAt },
     });
