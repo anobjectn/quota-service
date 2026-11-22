@@ -38,10 +38,12 @@
 import type { Provider } from "./types";
 import type { UsageReport, ProviderReport } from "./present";
 import {
+  ALL_GEMINI_IDENTITY,
   coerceModelIdentity,
   hasModelIdentity,
   identityConstrainsModel,
-  NO_MODEL_IDENTITY,
+  mentionsOnlyPartnerFamily,
+  mergeModelIdentities,
   parseModelIdentity,
   type ModelIdentity,
 } from "./model-identity";
@@ -231,25 +233,30 @@ function minPrimaryWindowHeadroom(
 /** Returns each model window's identity. Snapshots from the Antigravity
  * collector carry one resolved identity per window in
  * `extra.modelWindowIdentity`, and that record is authoritative: a window it
- * lists without an identity binds no candidate. Snapshots saved before that
- * field existed fall back to parsing the window's recorded model ID, then its
- * key (with collision disambiguators such as "[id]" or "#2" removed). */
+ * lists without an identity (a partner pool) binds no candidate. Snapshots
+ * saved before that field existed fall back to the same grammar: the window's
+ * recorded model ID merged with its key (collision disambiguators such as
+ * "[id]" or "#2" removed). For a quota-summary snapshot, a window that names
+ * no model family and no partner is a Gemini quota of unknown scope and binds
+ * every Gemini candidate, as the collector does now. */
 function modelWindowIdentityLookup(extra: Record<string, unknown> | undefined): (name: string) => ModelIdentity {
   const typed = extra?.modelWindowIdentity;
   if (typed && typeof typed === "object" && !Array.isArray(typed)) {
     const record = typed as Record<string, unknown>;
-    return (name) => (Object.hasOwn(record, name) ? coerceModelIdentity(record[name]) : NO_MODEL_IDENTITY);
+    return (name) => (Object.hasOwn(record, name) ? coerceModelIdentity(record[name]) : ALL_GEMINI_IDENTITY);
   }
   const legacyIds = extra?.modelWindowIds;
   const ids =
     legacyIds && typeof legacyIds === "object" && !Array.isArray(legacyIds)
       ? (legacyIds as Record<string, unknown>)
       : {};
+  const isQuotaSummary = extra?.endpoint === "RetrieveUserQuotaSummary";
   return (name) => {
-    const recorded = Object.hasOwn(ids, name) ? ids[name] : undefined;
-    const fromId = typeof recorded === "string" ? parseModelIdentity(recorded) : NO_MODEL_IDENTITY;
-    if (hasModelIdentity(fromId)) return fromId;
-    return parseModelIdentity(name.trim().replace(/(?:\s+(?:\[[^\]]*\]|#\d+))+$/, ""));
+    const recorded = Object.hasOwn(ids, name) && typeof ids[name] === "string" ? (ids[name] as string) : null;
+    const key = name.trim().replace(/(?:\s+(?:\[[^\]]*\]|#\d+))+$/, "");
+    const identity = mergeModelIdentities([parseModelIdentity(recorded), parseModelIdentity(key)]);
+    if (hasModelIdentity(identity) || !isQuotaSummary) return identity;
+    return mentionsOnlyPartnerFamily(`${recorded ?? ""} ${key}`) ? identity : ALL_GEMINI_IDENTITY;
   };
 }
 

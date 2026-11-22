@@ -736,6 +736,125 @@ test("recommendation follows one resolved identity per window: model IDs, varian
   expect(recommend(qualified)).toBe("Gemini 3.8 Flash@90");
 });
 
+test("recommendation fails closed for words outside the model vocabulary and keeps every window", () => {
+  const now = 1_800_000_000_000;
+  const recommend = (snapshot: ReturnType<typeof normalizeQuotaSummary>, profile: "feature" | "large_refactor" = "feature") => {
+    expect(snapshot).not.toBeNull();
+    const rec = recommendModel(profile, {
+      generatedAt: now,
+      providers: [{
+        provider: "antigravity",
+        status: "ok",
+        source: "antigravity_local",
+        dataAgeMs: 0,
+        capturedAt: now,
+        snapshot,
+        manualEntries: [],
+      }],
+    }).recommendation;
+    return `${rec?.model}@${rec?.headroomPercent}`;
+  };
+  const session = { displayName: "Session", window: "18000s", remainingFraction: 0.9 };
+  const shared = { displayName: "Gemini", buckets: [session] };
+  const groups = (...rest: unknown[]) => normalizeQuotaSummary({ groups: [shared, ...rest] as never });
+  const primary = (...buckets: unknown[]) =>
+    normalizeQuotaSummary({ groups: [{ displayName: "Gemini", buckets: [session, ...buckets] }] as never });
+
+  // A shared weekly bucket stays in the shared slot whatever its label, ID, or group name.
+  const sharedWeekly = [
+    ...["Weekly requests", "Weekly usage", "Free tier weekly", "Weekly Gemini quota", "Weekly (7d)", "Gemini (Weekly)"].map(
+      (displayName) => primary({ displayName, window: "604800s", remainingFraction: 0 }),
+    ),
+    ...["gemini-free-tier-weekly", "gemini_code_assist_weekly", "prod_gemini_quota_1", "prod_quota_1"].map(
+      (bucketId) => primary({ bucketId, window: "604800s", remainingFraction: 0 }),
+    ),
+    normalizeQuotaSummary({ groups: [{ name: "gemini-free-tier", displayName: "Gemini", buckets: [
+      session, { displayName: "Weekly", window: "604800s", remainingFraction: 0 },
+    ] }] }),
+  ];
+  for (const snapshot of sharedWeekly) {
+    expect(snapshot!.weekly?.usedPercent).toBe(100);
+    expect(recommend(snapshot)).toBe("Gemini 4 Argon@0");
+  }
+
+  // A word that is not a known model name never invents a model: the window limits the family.
+  const exhaustedFamily = [
+    groups({ displayName: "Gemini 4 Interactive", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
+    groups({ displayName: "Gemini 4 Family", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
+    groups({ displayName: "Gemini 4 Agent Mode", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
+    ...["Interactive", "Requests per day", "Input tokens"].map((displayName) =>
+      groups({ name: "gemini-4", displayName: "Gemini 4", buckets: [{ displayName, remainingFraction: 0 }] }),
+    ),
+    groups({ name: "gemini-4", displayName: "Gemini 4", buckets: [
+      { displayName: "Weekly", bucketId: "gemini-4-7days", window: "604800s", remainingFraction: 0 },
+    ] }),
+    groups({ name: "gemini-4", displayName: "Gemini 4", buckets: [
+      { bucketId: "interactive", displayName: "Interactive", window: "18000s", remainingFraction: 0 },
+      { bucketId: "background", displayName: "Background", window: "18000s", remainingFraction: 0.5 },
+    ] }),
+    // Version spellings normalize.
+    groups({ displayName: "Gemini 4.0 Argon", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
+    // A prefixed resource name still names the model.
+    groups({ name: "projects/gemini-prod/models/gemini-4-argon", displayName: "Argon", buckets: [
+      { displayName: "Weekly", window: "604800s", remainingFraction: 0 },
+    ] }),
+  ];
+  for (const snapshot of exhaustedFamily) {
+    expect(recommend(snapshot)).toBe("Gemini 3.8 Flash@90");
+  }
+
+  // A pool that names two models limits both.
+  for (const displayName of ["Gemini 4 Argon and Neon", "Gemini 4 (Argon + Neon)", "Gemini 4 Argon / Neon"]) {
+    const snapshot = groups({ displayName, buckets: [{ displayName: "Weekly", remainingFraction: 0 }] });
+    expect(recommend(snapshot, "large_refactor")).toBe("Gemini 4 Neon@0");
+  }
+
+  // Sources that agree keep the narrowest identity.
+  const exhaustedNeon = [
+    // A short label takes its family from the bucket ID.
+    primary({ bucketId: "gemini-4", displayName: "Neon", remainingFraction: 0 }),
+    // An unversioned "Gemini <name>" label takes the group's version.
+    groups({ name: "gemini-4", displayName: "Gemini 4", buckets: [{ displayName: "Gemini Neon", remainingFraction: 0 }] }),
+    // A family-only model ID does not widen an explicit model label.
+    normalizeAvailableModels({ models: {
+      "gemini-4": { displayName: "Gemini 4 Neon", quotaInfo: { remainingFraction: 0 } },
+      "gemini-4-argon": { displayName: "Gemini 4 Argon", quotaInfo: { remainingFraction: 0.9 } },
+      "gemini-3.8-flash": { displayName: "Gemini 3.8 Flash", quotaInfo: { remainingFraction: 0.5 } },
+    } }),
+  ];
+  for (const snapshot of exhaustedNeon) {
+    expect(recommend(snapshot)).toBe("Gemini 4 Argon@90");
+  }
+
+  // A label that repeats an imprecise display name does not override the group's variant name.
+  for (const displayName of ["Gemini 4 Argon (Weekly)", "Gemini 4 Argon (5h)", "Gemini 4 Argon Interactive"]) {
+    const snapshot = groups({ name: "gemini-4-argon-lite", displayName: "Gemini 4 Argon", buckets: [
+      { displayName, remainingFraction: 0 },
+    ] });
+    expect(recommend(snapshot)).toBe("Gemini 4 Argon@90");
+  }
+  expect(recommend(groups({ name: "gemini-4-argon", displayName: "Gemini 4 Argon", buckets: [
+    { displayName: "Gemini Lite", remainingFraction: 0 },
+  ] }))).toBe("Gemini 4 Argon@90");
+
+  // Primary-group leftovers with the same label but different models keep both windows.
+  for (const order of [0, 1]) {
+    const buckets = [
+      { bucketId: "gemini-4-neon", displayName: "Model quota", remainingFraction: 0 },
+      { bucketId: "gemini-4-argon", displayName: "Model quota", remainingFraction: 0.5 },
+    ];
+    const snapshot = primary(...(order === 0 ? buckets : [...buckets].reverse()));
+    expect(Object.keys(snapshot!.modelWindows!)).toHaveLength(2);
+    expect(recommend(snapshot)).toBe("Gemini 4 Argon@50");
+  }
+  const sameLabel = primary(
+    { displayName: "Gemini 4 Argon", bucketId: "gemini-4-argon-weekly", window: "604800s", remainingFraction: 0.5 },
+    { displayName: "Gemini 4 Argon", bucketId: "gemini-4-argon-lite-weekly", window: "604800s", remainingFraction: 0 },
+  );
+  expect(Object.keys(sameLabel!.modelWindows!)).toHaveLength(2);
+  expect(recommend(sameLabel)).toBe("Gemini 4 Argon@50");
+});
+
 test("recommendation reads saved snapshots that predate extra.modelWindowIdentity", () => {
   const now = 1_800_000_000_000;
   const recommend = (extra: Record<string, unknown>, modelWindows: Record<string, { usedPercent: number; resetsAt: null }>) =>
@@ -751,7 +870,19 @@ test("recommendation reads saved snapshots that predate extra.modelWindowIdentit
         manualEntries: [],
       }],
     }).recommendation;
-  // A recorded model ID wins over the key.
+  // A recorded model ID and the key merge: the narrower one wins when they agree.
+  const familyId = recommend(
+    { modelWindowIds: { "Gemini 4 Argon": "gemini-4", "Gemini 4 Neon": "gemini-4" } },
+    { "Gemini 4 Argon": { usedPercent: 10, resetsAt: null }, "Gemini 4 Neon": { usedPercent: 100, resetsAt: null } },
+  );
+  expect(familyId?.model).toBe("Gemini 4 Argon");
+  expect(familyId?.headroomPercent).toBe(90);
+  // A quota-summary window that names no model family is a Gemini quota of unknown scope.
+  const unnamed = recommend(
+    { endpoint: "RetrieveUserQuotaSummary" },
+    { "Weekly requests": { usedPercent: 100, resetsAt: null }, "Claude / GPT (5h)": { usedPercent: 100, resetsAt: null } },
+  );
+  expect(unnamed?.headroomPercent).toBe(0);
   const byId = recommend(
     { modelWindowIds: { "Gemini 4 Argon [gemini-4-argon-lite]": "gemini-4-argon-lite" } },
     { "Gemini 4 Argon [gemini-4-argon-lite]": { usedPercent: 100, resetsAt: null } },
