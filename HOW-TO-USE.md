@@ -417,9 +417,10 @@ their sign-off. Designed-but-not-built shape, for whoever picks this up:
 
 - `get_usage` — same data as `quota json`, refreshed on call (best-effort,
   respecting poll floors).
-- `get_resets` — natural 5h/weekly/pool reset times plus Codex's banked reset
-  credits (`available_count`, `total_earned_count`, each credit's status and
-  expiry). Report-only, as above.
+- `get_resets` — natural 5h/weekly/pool reset times (including Antigravity
+  `model:<name>` windows) plus Codex's banked reset credits
+  (`available_count`, `total_earned_count`, each credit's status and expiry).
+  Report-only, as above.
 - `estimate_cost({ taskProfile? })` — v1.5 heuristic token-range estimate
   (see `src/estimation.ts` for the full calibration-provenance comment).
   Returns real structured data, no longer a stub.

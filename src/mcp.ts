@@ -46,7 +46,7 @@ server.registerTool(
   {
     title: "Get natural resets and banked reset credits",
     description:
-      "Returns each provider's natural reset times for 5h/weekly windows and Warp's monthly refresh, plus Codex's banked reset credits (available_count/total_earned_count and each credit's status/expiry). Report-only: this service never consumes a reset credit or triggers a purchase.",
+      "Returns each provider's natural reset times for 5h/weekly windows, Antigravity per-model `model:<name>` windows, and Warp's monthly refresh, plus Codex's banked reset credits (available_count/total_earned_count and each credit's status/expiry). Report-only: this service never consumes a reset credit or triggers a purchase.",
     inputSchema: {},
   },
   async () => {

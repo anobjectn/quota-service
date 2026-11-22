@@ -626,9 +626,28 @@ function isPartnerGroupName(name: string): boolean {
   return /\b(?:claude|anthropic|gpt|openai|oss)\b/i.test(name) && !/\bgemini\b/i.test(name);
 }
 
-function primaryGeminiGroupScore(groupName: string, hasFiveHour: boolean, hasWeekly: boolean): number {
+const CANONICAL_MODEL_ID_RE = /^(?:models\/)?(?:gemini|claude|gpt|oss)[-_a-z0-9.]+$/i;
+
+function isCanonicalModelId(value: string | null): value is string {
+  return value !== null && CANONICAL_MODEL_ID_RE.test(value);
+}
+
+function primaryGeminiGroupScore(
+  groupName: string,
+  hasFiveHour: boolean,
+  hasWeekly: boolean,
+  rawName: string | null = null,
+): number {
   const trimmed = groupName.trim();
   if (trimmed && isPartnerGroupName(trimmed)) return -1;
+  // Never promote a group whose canonical `name` explicitly targets a specific
+  // model (e.g. `name: "gemini-4-argon"`, `displayName: "Gemini"`).
+  if (rawName && isCanonicalModelId(rawName)) {
+    const normalizedRaw = rawName.replace(/^models\//i, "").replace(/[-_]+/g, " ").trim();
+    if (!/^(?:google\s+)?gemini(?:\s+(?:models?|all|default|general|shared|core|pool|quota))?$/i.test(normalizedRaw)) {
+      return -1;
+    }
+  }
   const cadenceBonus = (hasFiveHour ? 2 : 0) + (hasWeekly ? 2 : 0);
   if (!trimmed || /^(?:default|all(?:\s+models)?|general|primary)$/i.test(trimmed)) {
     return 90 + cadenceBonus;
@@ -700,13 +719,15 @@ function formatModelWindowKey(
     const qualifierParts: string[] = [];
     if (distinctBucketQualifier) qualifierParts.push(distinctBucketQualifier);
     if (timeQualifier) {
+      const normBase = baseLabel.replace(/[_-]+/g, " ");
+      const normBucket = distinctBucketQualifier?.replace(/[_-]+/g, " ") ?? null;
       const alreadyTagged =
-        (cadence === "fiveHour" && /\b5h\b|\b5[\s-]*hour/i.test(baseLabel)) ||
-        (cadence === "weekly" && /\bweekly\b|\b7d\b/i.test(baseLabel)) ||
+        (cadence === "fiveHour" && /\b5h\b|\b5\s*hour/i.test(normBase)) ||
+        (cadence === "weekly" && /\bweekly\b|\b7d\b/i.test(normBase)) ||
         baseLabel.toLowerCase().includes(`(${timeQualifier.toLowerCase()})`) ||
-        (distinctBucketQualifier !== null &&
-          ((cadence === "fiveHour" && /\b5h\b|\b5[\s-]*hour/i.test(distinctBucketQualifier)) ||
-            (cadence === "weekly" && /\bweekly\b|\b7d\b/i.test(distinctBucketQualifier))));
+        (normBucket !== null &&
+          ((cadence === "fiveHour" && /\b5h\b|\b5\s*hour/i.test(normBucket)) ||
+            (cadence === "weekly" && /\bweekly\b|\b7d\b/i.test(normBucket))));
       if (!alreadyTagged) qualifierParts.push(timeQualifier);
     }
 
@@ -721,9 +742,10 @@ function formatModelWindowKey(
   const hasSpecificLabel = bucketLabel !== null && !isGenericBucketLabel(bucketLabel, groupLabel);
   const baseLabel = hasSpecificLabel ? bucketLabel : (durationSuffix ?? groupLabel);
   if (cadenceSuffix) {
+    const normBase = baseLabel.replace(/[_-]+/g, " ");
     const alreadyTagged =
-      (cadence === "fiveHour" && /\b5h\b|\b5[\s-]*hour/i.test(baseLabel)) ||
-      (cadence === "weekly" && /\bweekly\b|\b7d\b/i.test(baseLabel));
+      (cadence === "fiveHour" && /\b5h\b|\b5\s*hour/i.test(normBase)) ||
+      (cadence === "weekly" && /\bweekly\b|\b7d\b/i.test(normBase));
     if (!alreadyTagged && (groupBucketCount > 1 || baseLabel === groupLabel)) {
       return `${baseLabel} (${cadenceSuffix})`;
     }
@@ -801,7 +823,7 @@ export function normalizeQuotaSummary(
 
   interface ParsedGroup {
     label: string;
-    modelId: string | null;
+    canonicalId: string | null;
     buckets: ParsedBucket[];
     score: number;
   }
@@ -813,10 +835,7 @@ export function normalizeQuotaSummary(
     const displayName = nonEmptyString(group.displayName);
     const rawName = nonEmptyString(group.name);
     const groupLabel = displayName ?? rawName ?? "";
-    const groupModelId =
-      rawName && /^(?:models\/)?(?:gemini|claude|gpt|oss)[-_a-z0-9.]+$/i.test(rawName)
-        ? rawName
-        : groupLabel || null;
+    const canonicalId = isCanonicalModelId(rawName) ? rawName : null;
     const parsedBuckets: ParsedBucket[] = [];
     for (const bucket of rawBuckets) {
       if (!bucket || typeof bucket !== "object" || Array.isArray(bucket)) continue;
@@ -840,9 +859,9 @@ export function normalizeQuotaSummary(
     const hasWeekly = parsedBuckets.some((b) => b.cadence === "weekly");
     parsedGroups.push({
       label: groupLabel,
-      modelId: groupModelId,
+      canonicalId,
       buckets: parsedBuckets,
-      score: primaryGeminiGroupScore(groupLabel, hasFiveHour, hasWeekly),
+      score: primaryGeminiGroupScore(groupLabel, hasFiveHour, hasWeekly, rawName),
     });
   }
 
@@ -863,6 +882,13 @@ export function normalizeQuotaSummary(
   let weekly: WindowQuota | null = null;
   const modelWindows: Record<string, WindowQuota> = {};
   const modelWindowIds: Record<string, string> = {};
+  const modelWindowGroups: Record<string, string> = {};
+
+  const isSharedPrimaryBucket = (bucket: ParsedBucket, groupLabel: string): boolean => {
+    if (bucket.label !== null) return isSharedPrimaryBucketLabel(bucket.label, groupLabel);
+    if (bucket.id !== null) return isSharedPrimaryBucketLabel(bucket.id, groupLabel);
+    return true;
+  };
 
   const pickBestBucketIndex = (
     buckets: ParsedBucket[],
@@ -875,9 +901,10 @@ export function normalizeQuotaSummary(
     for (let j = 0; j < buckets.length; j++) {
       const bucket = buckets[j]!;
       if (bucket.cadence !== cadence) continue;
-      // Never promote a model-specific bucket (e.g. "Gemini 4 Neon weekly") inside
-      // the shared primary group into the shared fiveHour/weekly slot.
-      if (!isSharedPrimaryBucketLabel(bucket.label, groupLabel)) continue;
+      // Never promote a model-specific bucket (e.g. "Gemini 4 Neon weekly" or
+      // bucketId "gemini-4-neon-weekly") inside the shared primary group into
+      // the shared fiveHour/weekly slot.
+      if (!isSharedPrimaryBucket(bucket, groupLabel)) continue;
       const diff = bucket.durationSeconds !== null
         ? Math.abs(bucket.durationSeconds - targetSeconds)
         : Number.POSITIVE_INFINITY;
@@ -893,8 +920,12 @@ export function normalizeQuotaSummary(
     bucket: ParsedBucket,
     groupBucketCount: number,
     isPrimaryGroup: boolean,
+    groupLabel: string,
   ): string | null => {
     if (bucket.label) return bucket.label;
+    if (isPrimaryGroup && bucket.id && !isSharedPrimaryBucketLabel(bucket.id, groupLabel)) {
+      return bucket.id;
+    }
     if (bucket.cadence === "unknown") {
       if (isPrimaryGroup || groupBucketCount > 1) {
         return bucket.id ?? (bucket.durationSeconds !== null ? formatDurationLabel(bucket.durationSeconds) : null);
@@ -903,6 +934,15 @@ export function normalizeQuotaSummary(
     }
     return null;
   };
+
+  interface PendingNonPrimaryEntry {
+    baseKey: string;
+    canonicalId: string | null;
+    groupHint: string | null;
+    bucketId: string | null;
+    quota: WindowQuota;
+  }
+  const pendingNonPrimary: PendingNonPrimaryEntry[] = [];
 
   for (let i = 0; i < parsedGroups.length; i++) {
     const group = parsedGroups[i]!;
@@ -928,7 +968,7 @@ export function normalizeQuotaSummary(
         const bucket = group.buckets[j]!;
         const key = formatModelWindowKey(
           displayGroupLabel,
-          fallbackBucketLabel(bucket, group.buckets.length, true),
+          fallbackBucketLabel(bucket, group.buckets.length, true, displayGroupLabel),
           bucket.cadence,
           bucket.durationSeconds,
           group.buckets.length,
@@ -939,39 +979,101 @@ export function normalizeQuotaSummary(
       continue;
     }
 
-    // Precompute candidate keys for non-primary group buckets so two distinct
-    // buckets with the same cadence and no distinct displayName still stay
-    // separate via their bucketId rather than overwriting one another's resetTime.
-    const tentativeKeys = group.buckets.map((bucket) =>
-      formatModelWindowKey(
+    for (const bucket of group.buckets) {
+      const resolvedBucketLabel = fallbackBucketLabel(
+        bucket,
+        group.buckets.length,
+        false,
         displayGroupLabel,
-        fallbackBucketLabel(bucket, group.buckets.length, false),
+      );
+      const baseKey = formatModelWindowKey(
+        displayGroupLabel,
+        resolvedBucketLabel,
         bucket.cadence,
         bucket.durationSeconds,
         group.buckets.length,
         false,
-      ),
-    );
-    const keyCounts = new Map<string, number>();
-    for (const k of tentativeKeys) {
-      keyCounts.set(k, (keyCounts.get(k) ?? 0) + 1);
+      );
+      // Only attach a free-text group display hint when the bucket does not
+      // already name a more specific model inside a broader family group
+      // (e.g. "Gemini 4 Argon" inside family group "Gemini 4").
+      const bucketNamesMoreSpecificModel =
+        resolvedBucketLabel !== null &&
+        !isGenericBucketLabel(resolvedBucketLabel, displayGroupLabel) &&
+        labelContainsGroup(resolvedBucketLabel, displayGroupLabel) &&
+        resolvedBucketLabel.trim().length > displayGroupLabel.trim().length;
+      const groupHint =
+        !group.canonicalId && group.label && !bucketNamesMoreSpecificModel ? group.label : null;
+      pendingNonPrimary.push({
+        baseKey,
+        canonicalId: group.canonicalId,
+        groupHint,
+        bucketId: bucket.id,
+        quota: bucket.quota,
+      });
     }
+  }
 
-    for (let j = 0; j < group.buckets.length; j++) {
-      const bucket = group.buckets[j]!;
-      let key = tentativeKeys[j]!;
-      if ((keyCounts.get(key) ?? 0) > 1 && bucket.id) {
-        key = `${key} [${bucket.id}]`;
-      }
-      insertModelWindow(modelWindows, key, bucket.quota);
-      if (group.modelId) {
-        modelWindowIds[key] = group.modelId;
+  // Pass 1: disambiguate colliding base keys across distinct canonical group IDs
+  // deterministically (independent of group order).
+  const groupIdsByBaseKey = new Map<string, Set<string>>();
+  for (const entry of pendingNonPrimary) {
+    if (!entry.canonicalId) continue;
+    const set = groupIdsByBaseKey.get(entry.baseKey) ?? new Set<string>();
+    set.add(entry.canonicalId.toLowerCase());
+    groupIdsByBaseKey.set(entry.baseKey, set);
+  }
+  const afterGroupKeys = pendingNonPrimary.map((entry) => {
+    const distinctIds = groupIdsByBaseKey.get(entry.baseKey);
+    if (entry.canonicalId && distinctIds && distinctIds.size > 1) {
+      return `${entry.baseKey} [${entry.canonicalId}]`;
+    }
+    return entry.baseKey;
+  });
+
+  // Pass 2: disambiguate remaining collisions (e.g. multiple buckets with the
+  // same cadence inside one group) by bucketId, or by stable ordinal `#1`/`#2`
+  // when neither displayName nor bucketId distinguishes them.
+  const keyCounts = new Map<string, number>();
+  for (const k of afterGroupKeys) {
+    keyCounts.set(k, (keyCounts.get(k) ?? 0) + 1);
+  }
+  const afterBucketIdKeys = pendingNonPrimary.map((entry, idx) => {
+    const k = afterGroupKeys[idx]!;
+    if ((keyCounts.get(k) ?? 0) > 1 && entry.bucketId) {
+      return `${k} [${entry.bucketId}]`;
+    }
+    return k;
+  });
+  const finalKeyCounts = new Map<string, number>();
+  for (const k of afterBucketIdKeys) {
+    finalKeyCounts.set(k, (finalKeyCounts.get(k) ?? 0) + 1);
+  }
+  const seenOrdinals = new Map<string, number>();
+
+  for (let idx = 0; idx < pendingNonPrimary.length; idx++) {
+    const entry = pendingNonPrimary[idx]!;
+    let key = afterBucketIdKeys[idx]!;
+    if ((finalKeyCounts.get(key) ?? 0) > 1) {
+      const ord = (seenOrdinals.get(key) ?? 0) + 1;
+      seenOrdinals.set(key, ord);
+      key = `${key} #${ord}`;
+    }
+    const existing = modelWindows[key];
+    insertModelWindow(modelWindows, key, entry.quota);
+    if (!existing || entry.quota.usedPercent > existing.usedPercent) {
+      if (entry.canonicalId) {
+        modelWindowIds[key] = entry.canonicalId;
+      } else if (entry.groupHint) {
+        modelWindowGroups[key] = entry.groupHint;
       }
     }
   }
 
-  const extraFields: Record<string, unknown> =
-    Object.keys(modelWindowIds).length > 0 ? { modelWindowIds } : {};
+  const extraFields: Record<string, unknown> = {
+    ...(Object.keys(modelWindowIds).length > 0 ? { modelWindowIds } : {}),
+    ...(Object.keys(modelWindowGroups).length > 0 ? { modelWindowGroups } : {}),
+  };
 
   const snapshot: WindowSnapshot = {
     kind: "window",
@@ -1390,7 +1492,10 @@ async function queryLocalTarget(
         return {
           snapshot: {
             ...baseSnapshot,
-            extra: buildExtra(plan, "RetrieveUserQuotaSummary", { loopbackHost: host }),
+            extra: {
+              ...baseSnapshot.extra,
+              ...buildExtra(plan, "RetrieveUserQuotaSummary", { loopbackHost: host }),
+            },
           },
           transportError: false,
           error: null,
@@ -1773,9 +1878,11 @@ async function withDeadline<T>(
   });
   const settled = promise.then((value) => ({ timedOut: false as const, value }));
   settled.catch(() => undefined);
-  const outcome = await Promise.race([settled, timeout]);
-  if (timer) clearTimeout(timer);
-  return outcome;
+  try {
+    return await Promise.race([settled, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** Public entry point: try local Antigravity language_server/agy first, then read-only Cloud Code OAuth fallback. */
@@ -1804,6 +1911,15 @@ export async function collectAntigravity(
   );
   if (local.result) {
     return local.result;
+  }
+
+  // Short-circuit before starting OAuth credential reads if the outer deadline
+  // has already elapsed.
+  if (overallDeadline - Date.now() <= 0) {
+    return unavailableCloudResult(
+      capturedAt,
+      `Antigravity collector exceeded its ${effectiveTotalBudgetMs}ms budget`,
+    );
   }
 
   // Tactic B: read-only Cloud Code OAuth fallback (credential acquisition is

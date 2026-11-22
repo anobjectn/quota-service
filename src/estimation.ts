@@ -245,16 +245,15 @@ function normalizeCanonicalModelId(value: string): string {
     .toLowerCase()
     .replace(/^models\//, "")
     .replace(/[_\s]+/g, "-")
-    .replace(/(?:-(?:low|medium|med|high|xhigh|thinking|tiered|preview|latest))+$/g, "");
+    .replace(/(?:-(?:low|medium|med|high|xhigh|thinking|tiered|preview|latest|\d{3,8}))+$/g, "");
 }
 
-function extractModelWindowIds(extra: Record<string, unknown> | undefined): Record<string, string> {
-  const raw = extra?.modelWindowIds;
+function extractStringRecord(raw: unknown): Record<string, string> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
   const out: Record<string, string> = {};
-  for (const [label, id] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof id === "string" && id.trim()) {
-      out[label] = id.trim();
+  for (const [label, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof val === "string" && val.trim()) {
+      out[label] = val.trim();
     }
   }
   return out;
@@ -263,11 +262,12 @@ function extractModelWindowIds(extra: Record<string, unknown> | undefined): Reco
 /** For Antigravity candidates, the binding constraint is the MINIMUM headroom
  * across any shared limits (`fiveHour`, `weekly`) AND any `modelWindows` entry
  * targeting that specific candidate model — matched exclusively by canonical
- * model/group ID in `snapshot.extra.modelWindowIds` when present, or by exact
- * normalized label (stripping only recognized trailing cadence/duration tags)
- * when no ID is recorded. Unrelated models' buckets are never borrowed: if
- * neither shared limits nor a matching model window exist for a candidate, its
- * headroom is `null` (unknown) so ranking falls back honestly to a measured tier. */
+ * model ID in `snapshot.extra.modelWindowIds` when present, or by exact
+ * normalized label / `snapshot.extra.modelWindowGroups` hint (stripping only
+ * recognized trailing cadence/duration tags) when no canonical ID is recorded.
+ * Unrelated models' buckets are never borrowed: if neither shared limits nor a
+ * matching model window exist for a candidate, its headroom is `null` (unknown)
+ * so ranking falls back honestly to a measured tier. */
 function computeAntigravityCandidateHeadroom(
   report: ProviderReport,
   option: ModelOption,
@@ -286,15 +286,18 @@ function computeAntigravityCandidateHeadroom(
   if (modelWindows) {
     const targetKey = normalizeModelMatchKey(option.model);
     const targetIds = new Set((option.modelIds ?? []).map(normalizeCanonicalModelId));
-    const windowIds = extractModelWindowIds(report.snapshot.extra);
+    const windowIds = extractStringRecord(report.snapshot.extra?.modelWindowIds);
+    const windowGroups = extractStringRecord(report.snapshot.extra?.modelWindowGroups);
 
     for (const [name, w] of Object.entries(modelWindows)) {
       if (!w || !Number.isFinite(w.usedPercent)) continue;
       const recordedId = windowIds[name];
+      const recordedGroup = windowGroups[name];
       const matches =
         recordedId != null
           ? targetIds.has(normalizeCanonicalModelId(recordedId))
-          : normalizeModelMatchKey(name) === targetKey;
+          : normalizeModelMatchKey(name) === targetKey ||
+            (recordedGroup != null && normalizeModelMatchKey(recordedGroup) === targetKey);
       if (!matches) continue;
 
       const headroom = 100 - w.usedPercent;
@@ -332,14 +335,18 @@ function computeHeadroom(report: ProviderReport): ProviderHeadroom {
     ));
     // When Antigravity only reports per-model buckets (e.g. per-model fallback
     // when cadence cannot be mapped to 5h/weekly), summarize provider-level
-    // headroom from Gemini modelWindows (checked by label or canonical ID).
+    // headroom from Gemini modelWindows (checked by label, canonical ID, or group).
     if (minHeadroom === null && report.provider === "antigravity" && report.snapshot.modelWindows) {
-      const windowIds = extractModelWindowIds(report.snapshot.extra);
+      const windowIds = extractStringRecord(report.snapshot.extra?.modelWindowIds);
+      const windowGroups = extractStringRecord(report.snapshot.extra?.modelWindowGroups);
       const entries = Object.entries(report.snapshot.modelWindows).filter(
         ([, w]) => w != null && Number.isFinite(w.usedPercent),
       );
       const preferred = entries.filter(
-        ([name]) => /gemini/i.test(name) || /gemini/i.test(windowIds[name] ?? ""),
+        ([name]) =>
+          /gemini/i.test(name) ||
+          /gemini/i.test(windowIds[name] ?? "") ||
+          /gemini/i.test(windowGroups[name] ?? ""),
       );
       const sourceEntries = preferred.length > 0 ? preferred : entries;
       for (const [name, w] of sourceEntries) {

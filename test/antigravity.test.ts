@@ -348,7 +348,7 @@ describe("Antigravity normalization helpers", () => {
       "Gemini 4 Argon (1h)": { usedPercent: 100, resetsAt: null },
       "Claude / GPT (1h)": { usedPercent: 20, resetsAt: null },
     });
-    expect(multiGroup!.extra?.modelWindowIds).toEqual({
+    expect(multiGroup!.extra?.modelWindowGroups).toEqual({
       "Gemini 4 Neon (weekly)": "Gemini 4 Neon",
       "Gemini 4 Argon (1h)": "Gemini 4 Argon",
       "Claude / GPT (1h)": "Claude / GPT",
@@ -371,12 +371,28 @@ describe("Antigravity normalization helpers", () => {
       "Gemini 4 Argon (Interactive, 5h)": { usedPercent: 10, resetsAt: Date.parse(t1) },
       "Gemini 4 Argon (Background, 5h)": { usedPercent: 80, resetsAt: Date.parse(t2) },
     });
-    expect(sameCadence!.extra?.modelWindowIds).toEqual({
+    expect(sameCadence!.extra?.modelWindowGroups).toEqual({
       "Gemini 4 Argon (Interactive, 5h)": "Gemini 4 Argon",
       "Gemini 4 Argon (Background, 5h)": "Gemini 4 Argon",
     });
 
-    // Model-specific bucket listed first inside shared Gemini group never steals shared weekly from generic Weekly.
+    // Two unlabeled, ID-less buckets sharing a cadence stay distinct via stable ordinal suffixes.
+    const unlabeledDup = normalizeQuotaSummary({
+      groups: [{
+        displayName: "Gemini 4 Argon",
+        buckets: [
+          { window: "18000s", remainingFraction: 0.9, resetTime: t1 },
+          { window: "18000s", remainingFraction: 0.2, resetTime: t2 },
+        ],
+      }],
+    });
+    expect(unlabeledDup!.modelWindows).toEqual({
+      "Gemini 4 Argon (5h) #1": { usedPercent: 10, resetsAt: Date.parse(t1) },
+      "Gemini 4 Argon (5h) #2": { usedPercent: 80, resetsAt: Date.parse(t2) },
+    });
+
+    // Model-specific bucket listed first inside shared Gemini group (by displayName OR bucketId)
+    // never steals shared weekly from the generic/shared Weekly bucket.
     const modelFirst = normalizeQuotaSummary({
       groups: [{
         displayName: "Gemini",
@@ -391,6 +407,42 @@ describe("Antigravity normalization helpers", () => {
     expect(modelFirst!.modelWindows).toEqual({
       "Gemini 4 Neon weekly": { usedPercent: 100, resetsAt: null },
     });
+
+    for (const modelBucketId of ["gemini-4-neon-weekly", "gemini_4_neon_weekly"]) {
+      const byBucketId = normalizeQuotaSummary({
+        groups: [{
+          displayName: "Gemini",
+          buckets: [
+            { bucketId: modelBucketId, window: "604800s", remainingFraction: 0 },
+            { bucketId: "shared-weekly", window: "604800s", remainingFraction: 0.9 },
+          ],
+        }],
+      });
+      expect(byBucketId!.weekly).toEqual({ usedPercent: 10, resetsAt: null });
+      expect(byBucketId!.modelWindows).toEqual({
+        [modelBucketId]: { usedPercent: 100, resetsAt: null },
+      });
+    }
+
+    // Structured groups with distinct canonical names sharing displayName ("Gemini 4" or "Gemini")
+    // stay disambiguated across groups regardless of order and never promote to shared weekly.
+    for (const displayName of ["Gemini 4", "Gemini"]) {
+      const dupGroups = normalizeQuotaSummary({
+        groups: [
+          { name: "gemini-4-argon", displayName, buckets: [{ displayName: "Weekly", remainingFraction: 0, resetTime: t1 }] },
+          { name: "gemini-4-neon", displayName, buckets: [{ displayName: "Weekly", remainingFraction: 0.9, resetTime: t2 }] },
+        ],
+      });
+      expect(dupGroups!.weekly).toBeNull();
+      expect(dupGroups!.modelWindows).toEqual({
+        [`${displayName} (weekly) [gemini-4-argon]`]: { usedPercent: 100, resetsAt: Date.parse(t1) },
+        [`${displayName} (weekly) [gemini-4-neon]`]: { usedPercent: 10, resetsAt: Date.parse(t2) },
+      });
+      expect(dupGroups!.extra?.modelWindowIds).toEqual({
+        [`${displayName} (weekly) [gemini-4-argon]`]: "gemini-4-argon",
+        [`${displayName} (weekly) [gemini-4-neon]`]: "gemini-4-neon",
+      });
+    }
   });
 
   test("disambiguates colliding display names across distinct canonical model IDs regardless of payload order", () => {

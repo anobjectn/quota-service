@@ -373,6 +373,52 @@ test("recommendation matches canonical model IDs when display labels differ and 
     expect(prefixedRec.recommendation?.headroomPercent).toBe(90);
   }
 
+  // Family-level group ("Gemini 4") holding per-model buckets and versioned group name ("gemini-4-argon-001")
+  // still bind Gemini 4 Argon properly in recommendModel.
+  const familySnap = normalizeQuotaSummary({
+    groups: [
+      { displayName: "Gemini", buckets: [{ displayName: "Session", remainingFraction: 0.9 }] },
+      { displayName: "Gemini 4", buckets: [{ displayName: "Gemini 4 Argon", remainingFraction: 0.0 }, { displayName: "Gemini 4 Neon", remainingFraction: 0.5 }] },
+    ],
+  });
+  expect(familySnap).not.toBeNull();
+  const familyRec = recommendModel("feature", {
+    generatedAt: now,
+    providers: [{
+      provider: "antigravity",
+      status: "ok",
+      source: "antigravity_local",
+      dataAgeMs: 0,
+      capturedAt: now,
+      snapshot: familySnap,
+      manualEntries: [],
+    }],
+  });
+  expect(familyRec.recommendation?.model).toBe("Gemini 3.8 Flash");
+  expect(familyRec.recommendation?.headroomPercent).toBe(90);
+
+  const versionedSnap = normalizeQuotaSummary({
+    groups: [
+      { displayName: "Gemini", buckets: [{ displayName: "Session", remainingFraction: 0.9 }] },
+      { name: "gemini-4-argon-001", displayName: "Gemini 4 Argon", buckets: [{ displayName: "Weekly", remainingFraction: 0.0 }] },
+    ],
+  });
+  expect(versionedSnap).not.toBeNull();
+  const versionedRec = recommendModel("feature", {
+    generatedAt: now,
+    providers: [{
+      provider: "antigravity",
+      status: "ok",
+      source: "antigravity_local",
+      dataAgeMs: 0,
+      capturedAt: now,
+      snapshot: versionedSnap,
+      manualEntries: [],
+    }],
+  });
+  expect(versionedRec.recommendation?.model).toBe("Gemini 3.8 Flash");
+  expect(versionedRec.recommendation?.headroomPercent).toBe(90);
+
   // Non-Antigravity provider (Anthropic) with only modelWindows keeps null provider headroom
   // (unchanged from base: light/mid stay unmeasured, while frontier still uses computeAnthropicFrontierHeadroom).
   const anthUsage: UsageReport = {
@@ -524,6 +570,57 @@ test("model-only Antigravity snapshot flows from collectAntigravity into usage, 
   expect(report.error).toContain("expired");
   expect(report.snapshot?.kind === "window" && report.snapshot.modelWindows?.["Gemini 4 Neon"]?.usedPercent).toBe(35);
   db.close();
+});
+
+test("Tactic A RetrieveUserQuotaSummary plan enrichment preserves extra.modelWindowIds for recommendModel", async () => {
+  const now = Date.now();
+  const collected = await collectAntigravity({
+    now: () => now,
+    runCommand: async (argv) =>
+      argv[0] === "ps"
+        ? { exitCode: 0, stdout: "  950 /Applications/Antigravity.app/Contents/Resources/language_server --csrf_token tok\n", stderr: "" }
+        : { exitCode: 0, stdout: "language_ 950 luis 10u IPv4 0x1 0t0 TCP 127.0.0.1:51950 (LISTEN)\n", stderr: "" },
+    request: (async (input: Parameters<typeof globalThis.fetch>[0]) => {
+      const url = String(input);
+      if (url.endsWith("/RetrieveUserQuotaSummary")) {
+        return Response.json({
+          groups: [
+            { displayName: "Gemini", buckets: [{ displayName: "Session", remainingFraction: 0.9 }] },
+            { name: "gemini-4-argon", displayName: "Argon", buckets: [{ displayName: "Interactive", window: "18000s", remainingFraction: 0 }] },
+          ],
+        });
+      }
+      if (url.endsWith("/GetUserStatus")) {
+        return Response.json({ userStatus: { userTier: { id: "g1-ultra-tier", name: "Google AI Ultra" } } });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof globalThis.fetch,
+  });
+
+  expect(collected.status).toBe("ok");
+  expect(collected.source).toBe("antigravity_local");
+  expect(collected.snapshot?.kind).toBe("window");
+  if (collected.snapshot?.kind === "window") {
+    expect(collected.snapshot.extra?.planType).toBe("ultra");
+    expect(collected.snapshot.extra?.modelWindowIds).toEqual({
+      "Argon (Interactive, 5h)": "gemini-4-argon",
+    });
+  }
+
+  const rec = recommendModel("feature", {
+    generatedAt: now,
+    providers: [{
+      provider: "antigravity",
+      status: "ok",
+      source: collected.source,
+      dataAgeMs: 0,
+      capturedAt: now,
+      snapshot: collected.snapshot,
+      manualEntries: [],
+    }],
+  });
+  expect(rec.recommendation?.model).toBe("Gemini 3.8 Flash");
+  expect(rec.recommendation?.headroomPercent).toBe(90);
 });
 
 test("recommendation returns no candidate instead of throwing for an empty report", () => {
