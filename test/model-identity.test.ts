@@ -7,7 +7,8 @@ import {
   coerceModelIdentity,
   identityConstrainsModel,
   modelIdIdentity,
-  poolTextIdentity,
+  poolNameIdentity,
+  widenUnknownGeminiModel,
 } from "../src/model-identity";
 
 describe("canonicalModelId", () => {
@@ -34,6 +35,9 @@ describe("canonicalModelId", () => {
     ["MODEL_PLACEHOLDER_M532", null],
     ["gemini", null],
     ["3p-weekly", null],
+    // Suffix stripping that leaves only the prefix.
+    ["gemini-high", null],
+    ["imagen-001", null],
     ["", null],
   ])("%s", (raw, expected) => {
     expect(canonicalModelId(raw)).toBe(expected);
@@ -54,28 +58,41 @@ describe("modelIdIdentity", () => {
   });
 });
 
-describe("poolTextIdentity", () => {
+describe("poolNameIdentity", () => {
   test.each([
+    // Whole pool names seen in real payloads (case and spacing ignored).
     ["Claude and GPT models", NO_MODEL_IDENTITY],
-    ["3p-weekly", NO_MODEL_IDENTITY],
-    ["Sonnet / Opus", NO_MODEL_IDENTITY],
+    ["  claude AND gpt   Models ", NO_MODEL_IDENTITY],
     ["Image generation", IMAGE_GENERATION_IDENTITY],
-    ["Gemini image generation (daily)", IMAGE_GENERATION_IDENTITY],
-    ["image_gen", IMAGE_GENERATION_IDENTITY],
-    ["Imagen", IMAGE_GENERATION_IDENTITY],
-    ["Text-to-image", IMAGE_GENERATION_IDENTITY],
-    // Anything that also names text, code, or partner models, or names no
-    // pool at all, fails closed to every Gemini model.
-    ["Text and image generation", ALL_GEMINI_IDENTITY],
-    ["Agent and image generation", ALL_GEMINI_IDENTITY],
-    ["Claude image generation", NO_MODEL_IDENTITY],
+    // Every other name fails closed to every Gemini text model, including
+    // names that contain the partner or image words.
+    ["Image generation and text", ALL_GEMINI_IDENTITY],
+    ["Text & image generation", ALL_GEMINI_IDENTITY],
+    ["Gemini + Imagen", ALL_GEMINI_IDENTITY],
+    ["Gemini image generation", ALL_GEMINI_IDENTITY],
+    ["All models (including image generation)", ALL_GEMINI_IDENTITY],
+    ["All models including Claude and GPT", ALL_GEMINI_IDENTITY],
+    ["Claude and Flash", ALL_GEMINI_IDENTITY],
+    ["1P and 3P models", ALL_GEMINI_IDENTITY],
+    ["Sonnet / Opus", ALL_GEMINI_IDENTITY],
+    ["3p-weekly", ALL_GEMINI_IDENTITY],
     ["Gemini Models", ALL_GEMINI_IDENTITY],
-    ["Gemini and Claude", ALL_GEMINI_IDENTITY],
-    ["Image input", ALL_GEMINI_IDENTITY],
-    ["Partner models", ALL_GEMINI_IDENTITY],
     [null, ALL_GEMINI_IDENTITY],
   ])("%s", (text, expected) => {
-    expect(poolTextIdentity(text)).toEqual(expected);
+    expect(poolNameIdentity(text)).toEqual(expected);
+  });
+});
+
+describe("widenUnknownGeminiModel", () => {
+  const roster = new Set(["gemini-4-argon"]);
+  test("a Gemini model ID outside the roster limits every Gemini text model", () => {
+    expect(widenUnknownGeminiModel(modelIdIdentity("gemini-4-argon-preview"), roster)).toEqual(ALL_GEMINI_IDENTITY);
+    expect(widenUnknownGeminiModel(modelIdIdentity("gemini-4-argon"), roster)).toEqual(modelIdIdentity("gemini-4-argon"));
+  });
+  test("image, partner, and pool identities are unchanged", () => {
+    for (const identity of [modelIdIdentity("imagen-4"), modelIdIdentity("claude-opus-5-5"), IMAGE_GENERATION_IDENTITY, NO_MODEL_IDENTITY]) {
+      expect(widenUnknownGeminiModel(identity, roster)).toEqual(identity);
+    }
   });
 });
 

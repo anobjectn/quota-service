@@ -9,12 +9,13 @@
  * - A window is model-specific only when the API gives it an exact model ID
  *   (a per-model entry's `modelId`, or a summary group that the same server's
  *   model list names). It then limits only that model.
- * - A partner pool ("Claude and GPT models") limits no Gemini model.
- * - An image-generation pool ("Image generation", "Imagen") or an image model
- *   ID ("imagen-4", "gemini-3-pro-image") limits only image generation, never
- *   a Gemini text model.
+ * - A pool is recognized by name only when the whole name is one seen in a
+ *   real payload: the partner pool "Claude and GPT models" limits no Gemini
+ *   model, and the image pool "Image generation" limits only image generation.
+ *   An image model ID ("imagen-4", "gemini-3-pro-image-preview") also limits
+ *   only image generation.
  * - Every other window is a Gemini quota of unknown scope and limits every
- *   Gemini model (fails closed).
+ *   Gemini text model (fails closed).
  */
 
 export interface ModelIdentity {
@@ -41,11 +42,10 @@ const IMAGE_MODEL_ID_RE = /^imagen-|-image(?:-|$)/;
 const EFFORT_SUFFIX_RE = /-(?:minimal|low|medium|high|xhigh)$/;
 /** Numbered releases ("models/gemini-4-argon-001"). */
 const RELEASE_SUFFIX_RE = /-\d{3}$/;
-const PARTNER_WORD_RE = /\b(?:claude|gpt|oss|anthropic|openai|sonnet|opus|haiku|3p)\b/;
-/** Names image generation: "Image generation", "image gen", "text-to-image", "Imagen". */
-const IMAGE_GENERATION_RE = /\b(?:images? (?:gen|generation|generations|generator|creation)|text to image|imagen)\b/;
-/** Names a text or code model next to the image words ("Text and image generation"). */
-const TEXT_MODEL_WORD_RE = /\b(?:text and|chat|code|coding|agent|agents|reasoning)\b/;
+/** Whole pool names seen in real Antigravity payloads, normalized (lowercase,
+ * single spaces). Extend these only from a captured payload. */
+const PARTNER_POOL_NAMES: ReadonlySet<string> = new Set(["claude and gpt models"]);
+const IMAGE_POOL_NAMES: ReadonlySet<string> = new Set(["image generation"]);
 
 /** Returns the canonical form of an API model ID, or null when the value is not
  * one: lowercased, any resource prefix ("models/", "projects/x/models/") and
@@ -57,7 +57,9 @@ export function canonicalModelId(value: string | null | undefined): string | nul
   const slash = id.lastIndexOf("models/");
   if (slash !== -1) id = id.slice(slash + "models/".length);
   if (!MODEL_ID_RE.test(id)) return null;
-  return id.replace(EFFORT_SUFFIX_RE, "").replace(RELEASE_SUFFIX_RE, "");
+  const stripped = id.replace(EFFORT_SUFFIX_RE, "").replace(RELEASE_SUFFIX_RE, "");
+  // "gemini-high" or "imagen-001" leave only the prefix: not a model ID.
+  return MODEL_ID_RE.test(stripped) ? stripped : null;
 }
 
 /** The identity of an exact API model ID; `NO_MODEL_IDENTITY` when the value is
@@ -73,17 +75,27 @@ function modelIdFamily(id: string): string | null {
   return id.startsWith("gemini-") ? "gemini" : null;
 }
 
-/** The identity of a pool known only by its name or label: a partner pool
- * (names a partner model or vendor and not Gemini) limits no Gemini model; an
- * image-generation pool (names image generation and no text or partner model)
- * limits only image generation; anything else limits every Gemini model. */
-export function poolTextIdentity(text: string | null | undefined): ModelIdentity {
-  if (typeof text !== "string") return ALL_GEMINI_IDENTITY;
-  const lower = text.toLowerCase().replace(/[_-]+/g, " ");
-  const partner = PARTNER_WORD_RE.test(lower);
-  if (partner && !/gemini/.test(lower)) return NO_MODEL_IDENTITY;
-  if (!partner && IMAGE_GENERATION_RE.test(lower) && !TEXT_MODEL_WORD_RE.test(lower)) return IMAGE_GENERATION_IDENTITY;
+/** The identity of a pool known only by its whole name: the partner pool
+ * "Claude and GPT models" limits no Gemini model, the image pool "Image
+ * generation" limits only image generation, and any other name (including
+ * names that merely contain those words) limits every Gemini text model. */
+export function poolNameIdentity(name: string | null | undefined): ModelIdentity {
+  if (typeof name !== "string") return ALL_GEMINI_IDENTITY;
+  const normalized = name.trim().toLowerCase().replace(/\s+/g, " ");
+  if (PARTNER_POOL_NAMES.has(normalized)) return NO_MODEL_IDENTITY;
+  if (IMAGE_POOL_NAMES.has(normalized)) return IMAGE_GENERATION_IDENTITY;
   return ALL_GEMINI_IDENTITY;
+}
+
+/** Widens a Gemini text-model identity whose exact ID is not in `knownIds` to
+ * every Gemini text model, so a renamed or unknown model ID
+ * ("gemini-4-argon-preview") never stops an exhausted window from limiting the
+ * candidates. Image and partner identities are unchanged. */
+export function widenUnknownGeminiModel(identity: ModelIdentity, knownIds: ReadonlySet<string>): ModelIdentity {
+  if (identity.model !== null && identity.family === ALL_GEMINI_IDENTITY.family && !knownIds.has(identity.model)) {
+    return ALL_GEMINI_IDENTITY;
+  }
+  return identity;
 }
 
 /** True when a window with identity `window` limits the candidate model `candidate`.

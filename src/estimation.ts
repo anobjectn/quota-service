@@ -42,7 +42,7 @@ import {
   coerceModelIdentity,
   identityConstrainsModel,
   modelIdIdentity,
-  poolTextIdentity,
+  widenUnknownGeminiModel,
   type ModelIdentity,
 } from "./model-identity";
 
@@ -168,6 +168,11 @@ const ROSTER: ModelOption[] = [
   { provider: "warp", tier: "frontier", model: "Sol (high)" },
 ];
 
+/** Exact model IDs of the Antigravity candidates above. */
+const ANTIGRAVITY_MODEL_IDS: ReadonlySet<string> = new Set(
+  ROSTER.filter((o) => o.provider === "antigravity").flatMap((o) => [...(o.modelIds ?? [])]),
+);
+
 const TIER_ORDER: ModelTier[] = ["light", "mid", "frontier"];
 
 interface ProviderHeadroom {
@@ -231,31 +236,18 @@ function minPrimaryWindowHeadroom(
 /** Returns each model window's identity. Snapshots from the Antigravity
  * collector carry one identity per window in `extra.modelWindowIdentity`, and
  * that record is authoritative: a window it lists without an identity (a
- * partner pool) binds no candidate, and a window it does not list binds every
- * Gemini candidate. Snapshots saved before that field existed use the same
- * rule as the collector: the window's recorded model ID or its key (collision
- * disambiguators such as "[id]" or "#2" removed) when it is an exact model ID,
- * else no identity for a partner-only name, else every Gemini model. */
+ * partner pool) binds no candidate. A window it does not list, and every
+ * window of a snapshot without the record, binds every Gemini candidate. A
+ * Gemini model ID that no Antigravity candidate holds also binds every Gemini
+ * candidate (see `widenUnknownGeminiModel`). */
 function modelWindowIdentityLookup(extra: Record<string, unknown> | undefined): (name: string) => ModelIdentity {
   const typed = extra?.modelWindowIdentity;
-  if (typed && typeof typed === "object" && !Array.isArray(typed)) {
-    const record = typed as Record<string, unknown>;
-    return (name) => (Object.hasOwn(record, name) ? coerceModelIdentity(record[name]) : ALL_GEMINI_IDENTITY);
-  }
-  const legacyIds = extra?.modelWindowIds;
-  const ids =
-    legacyIds && typeof legacyIds === "object" && !Array.isArray(legacyIds)
-      ? (legacyIds as Record<string, unknown>)
-      : {};
-  return (name) => {
-    const recorded = Object.hasOwn(ids, name) && typeof ids[name] === "string" ? (ids[name] as string) : null;
-    const key = name.trim().replace(/(?:\s+(?:\[[^\]]*\]|#\d+))+$/, "");
-    for (const candidate of [recorded, key]) {
-      const identity = modelIdIdentity(candidate);
-      if (identity.model !== null) return identity;
-    }
-    return poolTextIdentity(`${recorded ?? ""} ${key}`);
-  };
+  const record =
+    typed && typeof typed === "object" && !Array.isArray(typed) ? (typed as Record<string, unknown>) : {};
+  return (name) =>
+    Object.hasOwn(record, name)
+      ? widenUnknownGeminiModel(coerceModelIdentity(record[name]), ANTIGRAVITY_MODEL_IDS)
+      : ALL_GEMINI_IDENTITY;
 }
 
 /** For Antigravity candidates, the binding constraint is the MINIMUM headroom
@@ -326,16 +318,13 @@ function computeHeadroom(report: ProviderReport): ProviderHeadroom {
     ));
     // When Antigravity only reports per-model buckets (e.g. per-model fallback
     // when cadence cannot be mapped to 5h/weekly), summarize provider-level
-    // headroom from Gemini modelWindows (checked by label or resolved identity).
+    // headroom from the modelWindows that limit Gemini text models (by resolved identity).
     if (minHeadroom === null && report.provider === "antigravity" && report.snapshot.modelWindows) {
       const identityOf = modelWindowIdentityLookup(report.snapshot.extra);
       const entries = Object.entries(report.snapshot.modelWindows).filter(
         ([, w]) => w != null && Number.isFinite(w.usedPercent),
       );
-      const preferred = entries.filter(([name]) => {
-        const identity = identityOf(name);
-        return /gemini/i.test(name) || /^gemini/.test(identity.model ?? identity.family ?? "");
-      });
+      const preferred = entries.filter(([name]) => identityOf(name).family === ALL_GEMINI_IDENTITY.family);
       const sourceEntries = preferred.length > 0 ? preferred : entries;
       for (const [name, w] of sourceEntries) {
         const headroom = 100 - w.usedPercent;

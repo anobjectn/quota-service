@@ -350,7 +350,7 @@ describe("Antigravity normalization helpers", () => {
         { displayName: "Gemini", buckets: [{ window: "18000s", remainingFraction: 0.9 }, { displayName: "Weekly", remainingFraction: 0.9 }] },
         { displayName: "Gemini 4 Neon", buckets: [{ displayName: "Weekly quota", remainingFraction: 0 }] },
         { displayName: "Gemini 4 Argon", buckets: [{ window: "3600s", remainingFraction: 0 }] },
-        { displayName: "Claude / GPT", buckets: [{ window: "3600s", remainingFraction: 0.8 }] },
+        { displayName: "Claude and GPT models", buckets: [{ window: "3600s", remainingFraction: 0.8 }] },
       ],
     }, null, undefined, KNOWN_MODELS);
     expect(multiGroup).not.toBeNull();
@@ -359,12 +359,12 @@ describe("Antigravity normalization helpers", () => {
     expect(multiGroup!.modelWindows).toEqual({
       "Gemini 4 Neon (weekly)": { usedPercent: 100, resetsAt: null },
       "Gemini 4 Argon (1h)": { usedPercent: 100, resetsAt: null },
-      "Claude / GPT (1h)": { usedPercent: 20, resetsAt: null },
+      "Claude and GPT models (1h)": { usedPercent: 20, resetsAt: null },
     });
     expect(multiGroup!.extra?.modelWindowIdentity).toEqual({
       "Gemini 4 Neon (weekly)": { model: "gemini-4-neon", family: "gemini" },
       "Gemini 4 Argon (1h)": { model: "gemini-4-argon", family: "gemini" },
-      "Claude / GPT (1h)": { model: null, family: null },
+      "Claude and GPT models (1h)": { model: null, family: null },
     });
 
     // Distinct named buckets sharing a cadence inside one non-primary group keep independent reset schedules.
@@ -419,8 +419,8 @@ describe("Antigravity normalization helpers", () => {
     expect(modelFirst!.modelWindows).toEqual({ "Gemini (weekly)": { usedPercent: 10, resetsAt: null } });
     expect(modelFirst!.extra?.modelWindowIdentity).toEqual({ "Gemini (weekly)": { model: null, family: "gemini" } });
 
-    // Structured groups with distinct canonical names sharing displayName ("Gemini 4" or "Gemini")
-    // stay disambiguated across groups regardless of order and never promote to shared weekly.
+    // Groups whose name and display name disagree ("gemini-4-argon" shown as
+    // "Gemini 4") are all-Gemini, so every window limits every Gemini model.
     for (const displayName of ["Gemini 4", "Gemini"]) {
       const dupGroups = normalizeQuotaSummary({
         groups: [
@@ -428,15 +428,9 @@ describe("Antigravity normalization helpers", () => {
           { name: "gemini-4-neon", displayName, buckets: [{ displayName: "Weekly", remainingFraction: 0.9, resetTime: t2 }] },
         ],
       }, null, undefined, KNOWN_MODELS);
-      expect(dupGroups!.weekly).toBeNull();
-      expect(dupGroups!.modelWindows).toEqual({
-        [`${displayName} (weekly) [gemini-4-argon]`]: { usedPercent: 100, resetsAt: Date.parse(t1) },
-        [`${displayName} (weekly) [gemini-4-neon]`]: { usedPercent: 10, resetsAt: Date.parse(t2) },
-      });
-      expect(dupGroups!.extra?.modelWindowIdentity).toEqual({
-        [`${displayName} (weekly) [gemini-4-argon]`]: { model: "gemini-4-argon", family: "gemini" },
-        [`${displayName} (weekly) [gemini-4-neon]`]: { model: "gemini-4-neon", family: "gemini" },
-      });
+      expect(dupGroups!.weekly).toEqual({ usedPercent: 100, resetsAt: Date.parse(t1) });
+      expect(Object.values(dupGroups!.modelWindows ?? {})).toEqual([{ usedPercent: 10, resetsAt: Date.parse(t2) }]);
+      expect(Object.values(dupGroups!.extra?.modelWindowIdentity as Record<string, unknown>)).toEqual([{ model: null, family: "gemini" }]);
     }
   });
 

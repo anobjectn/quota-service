@@ -311,14 +311,15 @@ test("per-model entries are identified only by their exact model ID", () => {
     },
   }))).toBe("Gemini 4 Argon@90");
 
-  // A sibling ID never limits the base model, and a family-like ID limits only itself.
-  for (const otherId of ["gemini-4-argon-lite", "gemini-4"]) {
+  // A Gemini ID that no candidate holds (a variant, a family-like ID, a renamed
+  // "-preview" release) limits every Gemini text model.
+  for (const otherId of ["gemini-4-argon-lite", "gemini-4", "gemini-4-argon-preview"]) {
     expect(recommendFrom(normalizeAvailableModels({
       models: {
         "gemini-4-argon": { displayName: "Gemini 4 Argon", quotaInfo: { remainingFraction: 0.9 } },
         [otherId]: { displayName: "Neon", quotaInfo: { remainingFraction: 0.0 } },
       },
-    }))).toBe("Gemini 4 Argon@90");
+    }))).toEndWith("@0");
   }
 
   // Real GetUserStatus entries: effort-suffixed IDs bind the base model; the
@@ -329,15 +330,31 @@ test("per-model entries are identified only by their exact model ID", () => {
     { label: "Gemini 3.8 Flash (High)", modelId: "gemini-3.8-flash-high", quotaInfo: { remainingFraction: 0.5 } },
   ]))).toBe("Gemini 3.8 Flash@50");
 
-  // An entry without a model ID limits every Gemini model, unless it names only a partner.
+  // An entry without a model ID limits every Gemini model, unless its whole label
+  // is a known pool name.
   expect(recommendFrom(normalizeModelConfigs([
     { label: "Gemini 4 Argon", modelOrAlias: { model: "MODEL_PLACEHOLDER_M417" }, quotaInfo: { remainingFraction: 0.9 } },
     { label: "Mystery pool", quotaInfo: { remainingFraction: 0.2 } },
   ]))).toBe("Gemini 4 Argon@20");
   expect(recommendFrom(normalizeModelConfigs([
     { label: "Gemini 4 Argon", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
-    { label: "Claude Opus 5.5", quotaInfo: { remainingFraction: 0 } },
+    { label: "Claude and GPT models", quotaInfo: { remainingFraction: 0 } },
   ]))).toBe("Gemini 4 Argon@90");
+  expect(recommendFrom(normalizeModelConfigs([
+    { label: "Gemini 4 Argon", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
+    { label: "Claude Opus 5.5", quotaInfo: { remainingFraction: 0 } },
+  ]))).toBe("Gemini 4 Argon@0");
+  // An entry without a model ID never merges into a same-label entry that has
+  // one, in either order, so its all-Gemini limit is kept.
+  for (const idless of [{ label: "Standard", quotaInfo: { remainingFraction: 0 } }, { label: "Standard", modelId: "", quotaInfo: { remainingFraction: 0 } }]) {
+    for (const scoped of [{ label: "Standard", modelId: "gemini-4-neon", quotaInfo: { remainingFraction: 0 } }, { label: "Standard", modelId: "claude-opus-5-5", quotaInfo: { remainingFraction: 0 } }]) {
+      for (const pair of [[scoped, idless], [idless, scoped]]) {
+        const snapshot = normalizeModelConfigs([...pair, { label: "Argon", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } }]);
+        expect(recommendFrom(snapshot)).toBe("Gemini 4 Argon@0");
+        expect(snapshot?.extra?.modelWindowIdentity).toMatchObject({ "Standard [unscoped]": { model: null, family: "gemini" } });
+      }
+    }
+  }
   // Image-generation models and pools limit no Gemini text model.
   expect(recommendFrom(normalizeModelConfigs([
     { label: "Gemini 4 Argon", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
@@ -378,13 +395,14 @@ test("a summary group is model-specific only when the server's model list names 
   const summary = (group: unknown, known = KNOWN_MODELS) =>
     normalizeQuotaSummary({ groups: [shared, group] as never }, null, undefined, known);
 
-  // The group's display name or name matches a listed model: only that model is limited,
-  // whatever the bucket labels, IDs, or windows say.
+  // The group's display name or name matches exactly one listed model (and no
+  // other field disagrees): only that model is limited, whatever the bucket
+  // labels, IDs, or windows say.
   for (const group of [
     { displayName: "Gemini 4 Argon", buckets: [{ bucketId: "gemini-argon-wtu-weekly", displayName: "Gemini 4 Argon Weekly Limit", window: "weekly", remainingFraction: 0 }] },
     { displayName: "Gemini 4 Argon", buckets: [{ displayName: "Session", remainingFraction: 0 }] },
     { displayName: "gemini 4  argon", buckets: [{ window: "3600s", remainingFraction: 0 }] },
-    { name: "gemini-4-argon", displayName: "Argon", buckets: [{ displayName: "Neon", remainingFraction: 0 }] },
+    { name: "gemini-4-argon", displayName: "Gemini 4 Argon", buckets: [{ displayName: "Neon", remainingFraction: 0 }] },
     { name: "models/gemini-4-argon-001", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] },
   ]) {
     expect(recommendFrom(summary(group))).toBe("Gemini 3.8 Flash@90");
@@ -392,25 +410,27 @@ test("a summary group is model-specific only when the server's model list names 
   expect(recommendFrom(summary({ displayName: "Gemini 4 Neon", buckets: [{ displayName: "Weekly quota", remainingFraction: 0 }] }), "large_refactor"))
     .toBe("Gemini 4 Argon@90");
 
-  // A partner pool limits no Gemini model.
+  // The real partner pool name limits no Gemini model.
   for (const group of [
     { displayName: "Claude and GPT models" },
-    { displayName: "Claude / GPT" },
-    { displayName: "Sonnet / Opus" },
-    { name: "claude-gpt-pool", displayName: "Partner pool" },
+    { displayName: "claude and gpt  models" },
   ]) {
     expect(recommendFrom(summary({ ...group, buckets: [{ bucketId: "3p-weekly", window: "weekly", remainingFraction: 0 }] })))
       .toBe("Gemini 4 Argon@90");
   }
+  // A group named by a listed partner model limits only that model.
+  expect(recommendFrom(summary(
+    { name: "claude-opus-5-5", displayName: "Claude Opus 5.5", buckets: [{ window: "weekly", remainingFraction: 0 }] },
+    [...KNOWN_MODELS, { id: "claude-opus-5-5", displayName: "Claude Opus 5.5" }],
+  ))).toBe("Gemini 4 Argon@90");
 
-  // An image-generation pool, or a group named by image model IDs, limits no
+  // The "Image generation" pool, or a group named by image model IDs, limits no
   // Gemini text model and never takes the shared slots.
   for (const group of [
     { displayName: "Image generation" },
-    { displayName: "Gemini image generation" },
-    { displayName: "Imagen" },
     { name: "imagen-4.0-generate-001" },
     { name: "gemini-3-pro-image-preview" },
+    { name: "imagen-4", displayName: "Image generation" },
   ]) {
     const snapshot = summary({ ...group, buckets: [{ bucketId: "image-daily", displayName: "Daily", remainingFraction: 0 }] });
     expect(recommendFrom(snapshot)).toBe("Gemini 4 Argon@90");
@@ -424,8 +444,23 @@ test("a summary group is model-specific only when the server's model list names 
 
   // Everything else limits every Gemini model (fails closed): no model list,
   // names and display names that disagree, IDs or names the server does not
-  // list, and every label-only way of naming a model.
+  // list, display names two listed models share, pool names other than the
+  // real ones (including names that contain the partner or image words), and
+  // every label-only way of naming a model.
   const exhaustedEverywhere = [
+    summary({ name: "gemini-4-argon", displayName: "Argon", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
+    summary({ name: "imagen-4", displayName: "Gemini Models", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
+    summary({ name: "claude-opus-5-5", displayName: "Gemini Models", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
+    summary({ name: "claude-gpt-pool", displayName: "Partner pool", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
+    summary({ displayName: "Gemini 4", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }, [
+      { id: "gemini-4-neon", displayName: "Gemini 4" },
+      { id: "gemini-4-argon", displayName: "Gemini 4" },
+    ]),
+    ...[
+      "Claude / GPT", "Sonnet / Opus", "All models including Claude and GPT", "Claude and Flash", "1P and 3P models",
+      "Gemini image generation", "Imagen", "Image generation and text", "Text & image generation", "Gemini + Imagen",
+      "All models (including image generation)",
+    ].map((displayName) => summary({ displayName, buckets: [{ displayName: "Weekly", remainingFraction: 0 }] })),
     summary({ displayName: "Gemini 4 Argon", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }, []),
     summary({ name: "gemini-4-argon", displayName: "Gemini 4 Neon", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
     summary({ name: "gemini-4-neon", displayName: "Gemini 4 Argon", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
@@ -524,34 +559,54 @@ test("model-only Antigravity snapshot flows from collectAntigravity into usage, 
   db.close();
 });
 
-test("recommendation reads saved snapshots that predate extra.modelWindowIdentity", () => {
-  const legacy = (modelWindows: Record<string, { usedPercent: number; resetsAt: null }>, extra: Record<string, unknown> = {}) => ({
+test("recommendation treats a window without a recorded identity as limiting every Gemini model", () => {
+  const snap = (modelWindows: Record<string, { usedPercent: number; resetsAt: null }>, extra: Record<string, unknown> = {}) => ({
     kind: "window" as const,
     fiveHour: { usedPercent: 10, resetsAt: null },
     weekly: null,
     modelWindows,
     extra,
   });
-  // A recorded model ID, or a key that is a model ID (disambiguators removed), is exact.
-  expect(recommendFrom(legacy({ "Gemini 4 (5h) [gemini-4-neon]": { usedPercent: 100, resetsAt: null } }, { modelWindowIds: { "Gemini 4 (5h) [gemini-4-neon]": "gemini-4-neon" } })))
-    .toBe("Gemini 4 Argon@90");
-  expect(recommendFrom(legacy({ "gemini-4-neon #2": { usedPercent: 100, resetsAt: null } }))).toBe("Gemini 4 Argon@90");
-  expect(recommendFrom(legacy({ "gemini-4-argon": { usedPercent: 100, resetsAt: null } }))).toBe("Gemini 3.8 Flash@90");
-  // A partner-only key limits no Gemini model.
-  expect(recommendFrom(legacy({ "Claude / GPT (weekly)": { usedPercent: 100, resetsAt: null } }))).toBe("Gemini 4 Argon@90");
-  // An image-generation key limits no Gemini text model.
-  expect(recommendFrom(legacy({ "Image generation (weekly)": { usedPercent: 100, resetsAt: null } }))).toBe("Gemini 4 Argon@90");
-  // Any other key limits every Gemini model, whatever the recorded endpoint spelling.
-  for (const endpoint of ["RetrieveUserQuotaSummary", "retrieveUserQuotaSummary", "fetchAvailableModels", undefined]) {
-    expect(recommendFrom(legacy({ "Gemini 4 Argon": { usedPercent: 100, resetsAt: null } }, { endpoint }))).toEndWith("@0");
-    expect(recommendFrom(legacy({ rpm: { usedPercent: 100, resetsAt: null } }, { endpoint }))).toEndWith("@0");
+  // Snapshots without extra.modelWindowIdentity (only earlier builds of this
+  // branch wrote them): every window limits every Gemini model, whatever its
+  // key, recorded ID, or endpoint.
+  for (const [key, extra] of [
+    ["gemini-4-neon", {}],
+    ["Gemini 4 (5h) [gemini-4-neon]", { modelWindowIds: { "Gemini 4 (5h) [gemini-4-neon]": "gemini-4-neon" } }],
+    ["Claude and GPT models (weekly)", {}],
+    ["Image generation (weekly)", {}],
+    ["gemini-weekly", { endpoint: "retrieveUserQuotaSummary" }],
+    ["Gemini 4 (weekly)", { modelWindowIds: { "Gemini 4 (weekly)": "gemini-4" } }],
+  ] as const) {
+    expect(recommendFrom(snap({ [key]: { usedPercent: 100, resetsAt: null } }, extra))).toEndWith("@0");
   }
-  // A current snapshot's identity record is authoritative, even over a model-like key,
-  // and stored family scopes from older builds widen to every Gemini model.
-  expect(recommendFrom(legacy({ "gemini-4-argon": { usedPercent: 100, resetsAt: null } }, { modelWindowIdentity: { "gemini-4-argon": { model: null, family: null } } })))
+  // A current snapshot's identity record is authoritative, even over a model-like key;
+  // a window missing from it, a stored family scope from older builds, and a
+  // Gemini model ID no candidate holds all limit every Gemini model.
+  expect(recommendFrom(snap({ "gemini-4-argon": { usedPercent: 100, resetsAt: null } }, { modelWindowIdentity: { "gemini-4-argon": { model: null, family: null } } })))
     .toBe("Gemini 4 Argon@90");
-  expect(recommendFrom(legacy({ "Gemini 4 (weekly)": { usedPercent: 100, resetsAt: null } }, { modelWindowIdentity: { "Gemini 4 (weekly)": { model: null, family: "gemini-4" } } })))
+  expect(recommendFrom(snap({ "Gemini 4 Neon": { usedPercent: 100, resetsAt: null } }, { modelWindowIdentity: {} }))).toEndWith("@0");
+  expect(recommendFrom(snap({ "Gemini 4 (weekly)": { usedPercent: 100, resetsAt: null } }, { modelWindowIdentity: { "Gemini 4 (weekly)": { model: null, family: "gemini-4" } } })))
     .toEndWith("@0");
+  expect(recommendFrom(snap({ "Gemini 4 Argon": { usedPercent: 100, resetsAt: null } }, { modelWindowIdentity: { "Gemini 4 Argon": { model: "gemini-4-argon-preview", family: "gemini" } } })))
+    .toEndWith("@0");
+  // Image windows limit no Gemini text model, and provider headroom ignores them.
+  const image = recommendModel("feature", {
+    generatedAt: 0,
+    providers: [{
+      provider: "antigravity", status: "ok", source: "antigravity_local", dataAgeMs: 0, capturedAt: 0, manualEntries: [],
+      snapshot: {
+        kind: "window", fiveHour: null, weekly: null,
+        modelWindows: { "Gemini 4 Argon": { usedPercent: 10, resetsAt: null }, "Gemini 3 Pro Image": { usedPercent: 100, resetsAt: null } },
+        extra: { modelWindowIdentity: {
+          "Gemini 4 Argon": { model: "gemini-4-argon", family: "gemini" },
+          "Gemini 3 Pro Image": { model: "gemini-3-pro-image-preview", family: "image" },
+        } },
+      },
+    }],
+  } as UsageReport);
+  expect(image.recommendation?.headroomPercent).toBe(90);
+  expect(image.headroomByProvider[0]?.headroomPercent).toBe(90);
 });
 
 test("Tactic A reads the Antigravity 2.34 CSRF token from the environment and resolves the real payload", async () => {

@@ -215,24 +215,34 @@ weekly / any present per-model window has the least headroom, and the
 `"...on its 5h window"`). A fresh per-model bucket can make the frontier tier
 cheaper to recommend even when the all-models weekly window is tight.
 
-For Antigravity, each window records the models it limits, and the rule never
-reads labels. A window limits one model only when the API gives it an exact
-model ID: a per-model entry's `modelId` (effort suffixes such as `-high` are
-removed), or a `RetrieveUserQuotaSummary` group whose name or display name
-matches a model in the same server's `GetUserStatus` model list (for example
-the "Gemini 4 Argon" group). A partner pool ("Claude and GPT models") limits no
-Gemini model. Image generation has its own scope: an image model ID
-(`imagen-*`, or an ID with an `image` segment such as
-`gemini-3-pro-image-preview`), or a pool whose name names only image generation
-("Image generation", "Imagen", "text-to-image"), limits image generation and no
-Gemini text model, so using up image quota never changes the text
-recommendation. A name that also names text, code, or agents ("Text and image
-generation") is not treated as image-only. Every other window limits every Gemini model, including the
-shared "Gemini Models" group and any group the server's model list does not
-name. This fails closed: an unrecognized pool that runs out makes every Gemini
-model look exhausted, and the Cloud Code fallback (which has no model list)
-treats the Argon group as shared. On Google AI Pro, Argon's separate weekly
-quota is still limited by the shared Gemini windows too.
+For Antigravity, each window records the models it limits. Free-text labels
+are never read for model or pool names. The supported inputs are:
+
+- **Exact model IDs.** A per-model entry's `modelId` (effort suffixes such as
+  `-high` and `-001` releases removed) limits only that model.
+- **Summary groups the server names.** A `RetrieveUserQuotaSummary` group
+  whose `name` is a model ID in the same server's `GetUserStatus` model list,
+  or whose display name exactly one listed model has (for example the
+  "Gemini 4 Argon" group), limits only that model. When the group has both a
+  name and a display name, both must give the same answer.
+- **Real pool names.** A group or entry whose whole name is "Claude and GPT
+  models" (the partner pool) limits no Gemini model. One whose whole name is
+  "Image generation", or whose model ID is an image model (`imagen-*`, or an
+  ID with an `image` segment such as `gemini-3-pro-image-preview`), limits
+  image generation only, so using up image quota never changes the text
+  recommendation. Names are compared whole, ignoring case and spacing.
+
+Everything else limits every Gemini text model, by design. That includes the
+shared "Gemini Models" group, a group whose fields disagree, a display name
+that two listed models share, a Gemini model ID none of the recommended
+models has (such as `gemini-4-argon-preview`), any other pool name (even one
+that contains the partner or image words, such as "Text and image
+generation"), and windows saved without an identity record. This fails
+closed: an unrecognized pool that runs out makes every Gemini text model look
+exhausted, the Cloud Code fallback (which has no model list) treats the Argon
+group as shared, and on Google AI Pro Argon's separate weekly quota is still
+limited by the shared Gemini windows too. New pool names are added only from a
+captured payload.
 
 ### Warp: manual entry for add-on credits
 

@@ -15,7 +15,7 @@ import {
   IMAGE_GENERATION_IDENTITY,
   canonicalModelId,
   modelIdIdentity,
-  poolTextIdentity,
+  poolNameIdentity,
   type ModelIdentity,
 } from "../model-identity";
 import type { CollectorResult, WindowQuota, WindowSnapshot } from "../types";
@@ -646,12 +646,6 @@ function extractBucketRemainingFraction(bucket: QuotaSummaryBucketPayload): numb
   return null;
 }
 
-const CANONICAL_MODEL_ID_RE = /^(?:models\/)?(?:gemini|claude|gpt|oss)[-_a-z0-9.]+$/i;
-
-function isCanonicalModelId(value: string | null): value is string {
-  return value !== null && CANONICAL_MODEL_ID_RE.test(value);
-}
-
 /** Only an all-Gemini group that names Gemini ("Gemini Models") can hold the
  * shared `fiveHour`/`weekly` slots; a group with both cadences outranks one
  * with a single cadence. Model-specific groups, partner and image-generation
@@ -740,36 +734,41 @@ function normalizeDisplayName(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-/** The group's identity. A group is model-specific only when the server's own
- * model list names it exactly and nothing in the group disagrees: its `name` is
- * a listed model ID, or its display name is a listed model's display name
- * ("Gemini 4 Argon"), and when both are present they name the same model. A
- * name that is a model ID the server does not list ("gemini-4") also counts as
- * a disagreement. A group named only by image model IDs, or a pool whose name
- * names only image generation ("Image generation"), limits only image
- * generation. A partner pool ("Claude and GPT models") limits no Gemini model.
- * Every other group is a Gemini quota of unknown scope and limits every Gemini
- * model. Labels are never parsed for model names. */
+/** The identity one group field (its `name` or its display name) gives:
+ * - a model ID the server lists: that exact model;
+ * - an image model ID ("imagen-4"): image generation; any other model ID the
+ *   server does not list ("gemini-4", "claude-gpt-pool"): every Gemini model;
+ * - a display name that exactly one listed model has: that model; a display
+ *   name that two or more listed models share: every Gemini model;
+ * - otherwise the whole-name pool rule (`poolNameIdentity`). */
+function resolveGroupFieldIdentity(value: string, knownModels: readonly KnownModel[]): ModelIdentity {
+  const id = canonicalModelId(value);
+  if (id !== null) {
+    if (knownModels.some((m) => m.id === id)) return modelIdIdentity(id);
+    return modelIdIdentity(id).family === IMAGE_GENERATION_IDENTITY.family ? IMAGE_GENERATION_IDENTITY : ALL_GEMINI_IDENTITY;
+  }
+  const display = normalizeDisplayName(value);
+  const matches = new Set(
+    knownModels.filter((m) => m.displayName !== null && normalizeDisplayName(m.displayName) === display).map((m) => m.id),
+  );
+  if (matches.size === 1) return modelIdIdentity([...matches][0]);
+  if (matches.size > 1) return ALL_GEMINI_IDENTITY;
+  return poolNameIdentity(value);
+}
+
+/** The group's identity: every field present must give the same identity
+ * (see `resolveGroupFieldIdentity`); any disagreement, or no field, means every
+ * Gemini model. Bucket labels and IDs are never read. */
 function resolveGroupIdentity(
   rawName: string | null,
   displayName: string | null,
   knownModels: readonly KnownModel[],
 ): ModelIdentity {
-  const display = displayName === null ? null : normalizeDisplayName(displayName);
-  const fromDisplay =
-    display === null
-      ? null
-      : (knownModels.find((m) => m.displayName !== null && normalizeDisplayName(m.displayName) === display)?.id ?? null);
-  const fromName = canonicalModelId(rawName);
-  const ids = [fromName, fromDisplay].filter((id): id is string => id !== null);
-  if (ids.length > 0 && ids.every((id) => id === ids[0]) && knownModels.some((m) => m.id === ids[0])) {
-    return modelIdIdentity(ids[0]);
-  }
-  if (ids.length > 0 && ids.every((id) => modelIdIdentity(id).family === IMAGE_GENERATION_IDENTITY.family)) {
-    return IMAGE_GENERATION_IDENTITY;
-  }
-  if (ids.every((id) => !id.startsWith("gemini-"))) return poolTextIdentity(`${rawName ?? ""} ${displayName ?? ""}`);
-  return ALL_GEMINI_IDENTITY;
+  const fields = [rawName, displayName].filter((v): v is string => v !== null);
+  if (fields.length === 0) return ALL_GEMINI_IDENTITY;
+  const identities = fields.map((v) => resolveGroupFieldIdentity(v, knownModels));
+  const [first] = identities as [ModelIdentity, ...ModelIdentity[]];
+  return identities.every((i) => i.model === first.model && i.family === first.family) ? first : ALL_GEMINI_IDENTITY;
 }
 
 function formatModelWindowKey(
@@ -919,7 +918,7 @@ export function normalizeQuotaSummary(
     const displayName = nonEmptyString(group.displayName);
     const rawName = nonEmptyString(group.name);
     const groupLabel = displayName ?? rawName ?? "";
-    const canonicalId = isCanonicalModelId(rawName) ? rawName : null;
+    const canonicalId = canonicalModelId(rawName);
     const parsedBuckets: ParsedBucket[] = [];
     for (const bucket of rawBuckets) {
       if (!bucket || typeof bucket !== "object" || Array.isArray(bucket)) continue;
@@ -1163,11 +1162,12 @@ function normalizeModelEntries(
   // deterministically (independent of payload order) so neither model's quota
   // or canonical ID is lost, while duplicate buckets for the same modelId
   // still collapse onto the tighter constraint.
+  // An entry without a model ID counts as its own ID (""), so it never shares
+  // a key, and so an identity, with a same-label entry that has one.
   const idsByLabel = new Map<string, Set<string>>();
   for (const entry of entries) {
-    if (!entry.modelId) continue;
     const set = idsByLabel.get(entry.label) ?? new Set<string>();
-    set.add(entry.modelId.toLowerCase());
+    set.add(entry.modelId ? entry.modelId.toLowerCase() : "");
     idsByLabel.set(entry.label, set);
   }
 
@@ -1176,15 +1176,13 @@ function normalizeModelEntries(
   for (const entry of entries) {
     const distinctIds = idsByLabel.get(entry.label);
     const key =
-      entry.modelId && distinctIds && distinctIds.size > 1
-        ? `${entry.label} [${entry.modelId}]`
-        : entry.label;
+      distinctIds && distinctIds.size > 1 ? `${entry.label} [${entry.modelId || "unscoped"}]` : entry.label;
     // Only the exact model ID identifies the model; the display label is never
     // parsed. An entry without a model ID is a Gemini quota of unknown scope
-    // (unless it names only a partner model or only image generation), so it
-    // limits every Gemini model.
+    // (unless its whole label is a known pool name), so it limits every Gemini
+    // model.
     const fromId = modelIdIdentity(entry.modelId);
-    const identity = fromId.model !== null ? fromId : poolTextIdentity(entry.label);
+    const identity = fromId.model !== null ? fromId : poolNameIdentity(entry.label);
     const existing = modelWindows[key];
     insertModelWindow(modelWindows, key, entry.quota);
     if (!existing || entry.quota.usedPercent > existing.usedPercent) {
