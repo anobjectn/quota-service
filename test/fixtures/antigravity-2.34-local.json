@@ -1,0 +1,388 @@
+{
+  "RetrieveUserQuotaSummary": {
+    "response": {
+      "groups": [
+        {
+          "displayName": "Gemini Models",
+          "description": "Models within this group: Gemini 4 Neon, Gemini 4 Hydrogen, Orchestrator (Neon), Gemini 3.8 Flash",
+          "buckets": [
+            {
+              "bucketId": "gemini-weekly",
+              "displayName": "Weekly Limit Remaining",
+              "description": "You have used some of your weekly limit, it will fully refresh in 6 days, 3 hours.",
+              "window": "weekly",
+              "remainingFraction": 0.7145604,
+              "resetTime": "2026-11-28T18:47:31Z"
+            },
+            {
+              "bucketId": "gemini-5h",
+              "displayName": "Five Hour Limit Remaining",
+              "description": "You have used some of your 5-hour limit, it will fully refresh in 2 hours, 50 minutes.",
+              "window": "5h",
+              "remainingFraction": 0.953614,
+              "resetTime": "2026-11-22T17:53:53Z"
+            }
+          ]
+        },
+        {
+          "displayName": "Claude and GPT models",
+          "description": "Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B",
+          "buckets": [
+            {
+              "bucketId": "3p-weekly",
+              "displayName": "Weekly Limit Remaining",
+              "window": "weekly",
+              "remainingFraction": 1,
+              "resetTime": "2026-11-29T15:03:33Z"
+            },
+            {
+              "bucketId": "3p-5h",
+              "displayName": "Five Hour Limit Remaining",
+              "window": "5h",
+              "remainingFraction": 1,
+              "resetTime": "2026-11-22T20:03:33Z"
+            }
+          ]
+        },
+        {
+          "displayName": "Gemini 4 Argon",
+          "description": "For paid Pro plans, Argon quota is separate. Higher Argon quota (included as part of the larger Gemini quota bucket) is available on Ultra plans.",
+          "buckets": [
+            {
+              "bucketId": "gemini-argon-wtu-weekly",
+              "displayName": "Gemini 4 Argon Weekly Limit",
+              "window": "weekly",
+              "remainingFraction": 1,
+              "resetTime": "2026-11-29T15:03:33Z"
+            }
+          ]
+        }
+      ],
+      "description": "Within each group, models share a weekly limit and a 5-hour limit. Quota is consumed proportionally to the cost of the tokens. Thus, limits will last longer with shorter tasks or using more cost-effective models. The 5-hour limit smooths out aggregate demand to fairly distribute global capacity across all users, while your weekly limit is tied directly to your individual tier."
+    }
+  },
+  "GetUserStatus": {
+    "userStatus": {
+      "userTier": {
+        "id": "g1-pro-tier",
+        "name": "Google AI Pro",
+        "description": "Google AI Pro"
+      },
+      "planStatus": {
+        "planInfo": {
+          "planName": "Pro",
+          "teamsTier": "TEAMS_TIER_PRO"
+        }
+      },
+      "cascadeModelConfigData": {
+        "clientModelConfigs": [
+          {
+            "label": "Gemini 4 Neon (High)",
+            "modelId": "gemini-4-neon-high",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M532"
+            },
+            "quotaInfo": {
+              "remainingFraction": 0.953614,
+              "resetTime": "2026-11-22T17:53:53Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Gemini 4 Neon (XHigh)",
+            "modelId": "gemini-4-neon-xhigh",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M535"
+            },
+            "quotaInfo": {
+              "remainingFraction": 0.953614,
+              "resetTime": "2026-11-22T17:53:53Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Gemini 4 Neon (Medium)",
+            "modelId": "gemini-4-neon-medium",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M533"
+            },
+            "quotaInfo": {
+              "remainingFraction": 0.953614,
+              "resetTime": "2026-11-22T17:53:53Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Gemini 4 Neon (Low)",
+            "modelId": "gemini-4-neon-low",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M534"
+            },
+            "quotaInfo": {
+              "remainingFraction": 0.953614,
+              "resetTime": "2026-11-22T17:53:53Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Gemini 4 Argon (Medium)",
+            "modelId": "gemini-4-argon-medium",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M418"
+            },
+            "quotaInfo": {
+              "remainingFraction": 1,
+              "resetTime": "2026-11-29T15:04:37Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Gemini 4 Argon (High)",
+            "modelId": "gemini-4-argon-high",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M417"
+            },
+            "quotaInfo": {
+              "remainingFraction": 1,
+              "resetTime": "2026-11-29T15:04:37Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Gemini 4 Argon (Low)",
+            "modelId": "gemini-4-argon-low",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M419"
+            },
+            "quotaInfo": {
+              "remainingFraction": 1,
+              "resetTime": "2026-11-29T15:04:37Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Gemini 4 Hydrogen (High)",
+            "modelId": "gemini-4-hydrogen-high",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M525"
+            },
+            "quotaInfo": {
+              "remainingFraction": 0.953614,
+              "resetTime": "2026-11-22T17:53:53Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Gemini 4 Hydrogen (XHigh)",
+            "modelId": "gemini-4-hydrogen-xhigh",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M528"
+            },
+            "quotaInfo": {
+              "remainingFraction": 0.953614,
+              "resetTime": "2026-11-22T17:53:53Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Gemini 4 Hydrogen (Medium)",
+            "modelId": "gemini-4-hydrogen-medium",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M526"
+            },
+            "quotaInfo": {
+              "remainingFraction": 0.953614,
+              "resetTime": "2026-11-22T17:53:53Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Gemini 4 Hydrogen (Low)",
+            "modelId": "gemini-4-hydrogen-low",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M527"
+            },
+            "quotaInfo": {
+              "remainingFraction": 0.953614,
+              "resetTime": "2026-11-22T17:53:53Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Orchestrator (Neon)",
+            "modelId": "gemini-pro-orchestrator-neon",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M537"
+            },
+            "quotaInfo": {
+              "remainingFraction": 0.953614,
+              "resetTime": "2026-11-22T17:53:53Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Orchestrator (Argon)",
+            "modelId": "gemini-pro-orchestrator-g1-pro",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M668"
+            },
+            "quotaInfo": {
+              "remainingFraction": 1,
+              "resetTime": "2026-11-29T15:04:37Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Gemini 3.8 Flash (High)",
+            "modelId": "gemini-3.8-flash-high",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M318"
+            },
+            "quotaInfo": {
+              "remainingFraction": 0.953614,
+              "resetTime": "2026-11-22T17:53:53Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Gemini 3.8 Flash (Medium)",
+            "modelId": "gemini-3.8-flash-medium",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M319"
+            },
+            "quotaInfo": {
+              "remainingFraction": 0.953614,
+              "resetTime": "2026-11-22T17:53:53Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Gemini 3.8 Flash (Low)",
+            "modelId": "gemini-3.8-flash-low",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M320"
+            },
+            "quotaInfo": {
+              "remainingFraction": 0.953614,
+              "resetTime": "2026-11-22T17:53:53Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Claude Opus 5.5 (Low)",
+            "modelId": "claude-opus-5-5-low",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M400"
+            },
+            "quotaInfo": {
+              "remainingFraction": 1,
+              "resetTime": "2026-11-22T20:04:37Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Claude Opus 5.5 (Medium)",
+            "modelId": "claude-opus-5-5-medium",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M401"
+            },
+            "quotaInfo": {
+              "remainingFraction": 1,
+              "resetTime": "2026-11-22T20:04:37Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Claude Opus 5.5 (High)",
+            "modelId": "claude-opus-5-5-high",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M402"
+            },
+            "quotaInfo": {
+              "remainingFraction": 1,
+              "resetTime": "2026-11-22T20:04:37Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Claude Sonnet 5.5 (Low)",
+            "modelId": "claude-sonnet-5-5-low",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M403"
+            },
+            "quotaInfo": {
+              "remainingFraction": 1,
+              "resetTime": "2026-11-22T20:04:37Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Claude Sonnet 5.5 (Medium)",
+            "modelId": "claude-sonnet-5-5-medium",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M404"
+            },
+            "quotaInfo": {
+              "remainingFraction": 1,
+              "resetTime": "2026-11-22T20:04:37Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Claude Sonnet 5.5 (High)",
+            "modelId": "claude-sonnet-5-5-high",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M405"
+            },
+            "quotaInfo": {
+              "remainingFraction": 1,
+              "resetTime": "2026-11-22T20:04:37Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "GPT-OSS 120B (Medium)",
+            "modelId": "gpt-oss-120b-medium",
+            "modelOrAlias": {
+              "model": "MODEL_OPENAI_GPT_OSS_120B_MEDIUM"
+            },
+            "quotaInfo": {
+              "remainingFraction": 1,
+              "resetTime": "2026-11-22T20:04:37Z"
+            },
+            "disabled": null
+          },
+          {
+            "label": "Gemini 4 Carbon",
+            "modelId": "gemini-4-carbon-disabled",
+            "modelOrAlias": {
+              "model": "MODEL_PLACEHOLDER_M670"
+            },
+            "quotaInfo": {},
+            "disabled": true
+          }
+        ],
+        "groupedModels": {
+          "claude-opus-5-5": {
+            "displayName": "Claude Opus 5.5"
+          },
+          "claude-sonnet-5-5": {
+            "displayName": "Claude Sonnet 5.5"
+          },
+          "gemini-3.8-flash": {
+            "displayName": "Gemini 3.8 Flash"
+          },
+          "gemini-4-argon": {
+            "displayName": "Gemini 4 Argon"
+          },
+          "gemini-4-hydrogen": {
+            "displayName": "Gemini 4 Hydrogen"
+          },
+          "gemini-4-neon": {
+            "displayName": "Gemini 4 Neon"
+          }
+        }
+      }
+    }
+  }
+}

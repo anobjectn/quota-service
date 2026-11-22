@@ -3,11 +3,12 @@
 // to POST /manual (Warp add-on credits). Read-only against provider systems
 // everywhere else — this file never calls a consume/purchase endpoint.
 
-const PROVIDER_LABEL = { codex: "Codex", anthropic: "Anthropic", warp: "Warp" };
+const PROVIDER_LABEL = { codex: "Codex", anthropic: "Anthropic", warp: "Warp", antigravity: "Antigravity" };
 const PROVIDER_SUB = {
   codex: "ChatGPT Plus — 5h / weekly windows",
   anthropic: "Claude Code Pro — 5h / weekly windows",
   warp: "monthly request pool",
+  antigravity: "Google Antigravity — 5h / weekly & model windows",
 };
 // Best-effort billing/usage links — links only, never automated. Verify
 // these still resolve if a provider reshuffles their settings UI.
@@ -15,6 +16,7 @@ const PURCHASE_LINKS = {
   codex: "https://chatgpt.com/#settings/Subscription",
   anthropic: "https://claude.ai/settings/billing",
   warp: "warp://settings/billing",
+  antigravity: "https://one.google.com/about/google-ai-plans/",
 };
 const SUPPORT_LINKS = {
   anthropicLimits: "https://support.claude.com/en/articles/11647753-understanding-usage-and-length-limits",
@@ -109,7 +111,7 @@ function fmtRunTime(run) {
 }
 
 function renderRunHistory(provider, runs = [], snapshot = null) {
-  if (provider === "warp") return "";
+  if (provider !== "codex" && provider !== "anthropic") return "";
   const fiveHourStart = snapshot?.kind === "window" && snapshot.fiveHour?.resetsAt
     ? snapshot.fiveHour.resetsAt - 5 * 60 * 60_000
     : null;
@@ -170,7 +172,7 @@ function arcGauge(percent, color, size = 92, stroke = 9) {
 
 function statusPill(status) {
   const label = { ok: "Ok", stale: "Stale", unavailable: "Unavailable", unknown: "Unknown" }[status] ?? status;
-  return `<span class="status-pill" data-status="${status}"><span class="dot"></span>${label}</span>`;
+  return `<span class="status-pill" data-status="${esc(status)}"><span class="dot"></span>${esc(label)}</span>`;
 }
 
 function renderCreditLedger(p) {
@@ -270,35 +272,75 @@ function renderAnthropicImportForm(web) {
   </form>`;
 }
 
+function provenanceSpec(p, extra) {
+  if (p.provider === "anthropic") {
+    return {
+      sourceTitle: "Provider quota API",
+      sourceCount: 3,
+      liveDescription: "Server-authoritative five-hour, weekly, scoped-limit, and monthly-spend data. The Claude Code OAuth token can read this endpoint.",
+      liveEndpoint: "api.anthropic.com/api/oauth/usage",
+    };
+  }
+  if (p.provider === "warp") {
+    return {
+      sourceTitle: "Provider quota API",
+      sourceCount: 2,
+      liveDescription: "Local Warp preference data. It reports the plan pool and allowances but not purchased add-on balances.",
+      liveEndpoint: "Warp AIRequestLimitInfo plist",
+    };
+  }
+  if (p.provider === "antigravity") {
+    const bySource = {
+      antigravity_local: {
+        sourceTitle: "Local Antigravity server",
+        liveDescription: "Read-only local Antigravity language server Connect-RPC quota summary and model status over loopback (127.0.0.1 / [::1]).",
+        liveEndpoint: `${extra.loopbackHost ?? "127.0.0.1"} — LanguageServerService/${extra.endpoint ?? "RetrieveUserQuotaSummary"}`,
+      },
+      antigravity_api: {
+        sourceTitle: "Cloud Code OAuth API",
+        liveDescription: "Read-only Google Cloud Code OAuth quota endpoints using existing local credentials. Never refreshes tokens, calls onboardUser, or consumes credits.",
+        liveEndpoint: extra.endpoint && extra.endpoint !== "retrieveUserQuotaSummary"
+          ? `cloudcode-pa.googleapis.com/v1internal:${extra.endpoint}`
+          : "daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+      },
+    };
+    const chosen = bySource[p.source] ?? {
+      sourceTitle: "Antigravity quota source",
+      liveDescription: "Read-only local Antigravity language server with fallback to Google Cloud Code OAuth quota endpoints. Never refreshes tokens or consumes credits.",
+      liveEndpoint: "127.0.0.1 / [::1] (local) or cloudcode-pa.googleapis.com (OAuth fallback)",
+    };
+    return { ...chosen, sourceCount: 1 };
+  }
+  return {
+    sourceTitle: "Provider quota API",
+    sourceCount: 2,
+    liveDescription: "Server-authoritative usage windows and banked-reset metadata, with local session data used only as a fallback.",
+    liveEndpoint: "chatgpt.com/backend-api/wham/usage",
+  };
+}
+
 function renderProvenance(p) {
   const extra = p.snapshot?.extra ?? {};
   const captured = p.capturedAt == null ? "unknown" : fmtAge(Date.now() - p.capturedAt);
   const isAnthropic = p.provider === "anthropic";
   const isWarp = p.provider === "warp";
+  const isAntigravity = p.provider === "antigravity";
   const rawLimits = isAnthropic && Array.isArray(extra.rawLimits) ? extra.rawLimits : null;
-  const liveDescription = isAnthropic
-    ? "Server-authoritative five-hour, weekly, scoped-limit, and monthly-spend data. The Claude Code OAuth token can read this endpoint."
-    : isWarp
-      ? "Local Warp preference data. It reports the plan pool and allowances but not purchased add-on balances."
-      : "Server-authoritative usage windows and banked-reset metadata, with local session data used only as a fallback.";
-  const liveEndpoint = isAnthropic
-    ? "api.anthropic.com/api/oauth/usage"
-    : isWarp ? "Warp AIRequestLimitInfo plist" : "chatgpt.com/backend-api/wham/usage";
-  const sourceCount = isAnthropic ? 3 : 2;
+  const { sourceTitle, sourceCount, liveDescription, liveEndpoint } = provenanceSpec(p, extra);
 
   return `<details class="provenance">
     <summary>
       <span>Sources / Provenance</span>
-      <span class="provenance-count">${sourceCount} feeds</span>
+      <span class="provenance-count">${sourceCount} ${sourceCount === 1 ? "feed" : "feeds"}</span>
     </summary>
     <div class="provenance-body">
       <div class="source-row">
         <span class="source-index">01</span>
         <div>
-          <div class="source-title"><strong>Provider quota API</strong><span class="source-badge is-live">live</span></div>
-          <p>${liveDescription}</p>
-          <code>${liveEndpoint}</code>
-          <div class="source-links"><a href="/usage" target="_blank">service snapshot ↗</a><span>captured ${captured}</span></div>
+          <div class="source-title"><strong>${esc(sourceTitle)}</strong><span class="source-badge is-live">live</span></div>
+          <p>${esc(liveDescription)}</p>
+          <code>${esc(liveEndpoint)}</code>
+          <div class="source-links"><a href="/usage" target="_blank">service snapshot ↗</a><span>captured ${esc(captured)}</span></div>
         </div>
       </div>
       ${isAnthropic ? `<div class="source-row">
@@ -311,12 +353,12 @@ function renderProvenance(p) {
           <div class="source-links">
             <a href="https://claude.ai/new#settings/usage" target="_blank" rel="noopener">Claude Usage ↗</a>
             <a href="${SUPPORT_LINKS.anthropicCredits}" target="_blank" rel="noopener">credit policy ↗</a>
-            ${p.anthropicWebCredits ? `<span>observed ${fmtAge(Date.now() - p.anthropicWebCredits.capturedAt)}</span>` : `<span>not yet imported</span>`}
+            ${p.anthropicWebCredits ? `<span>observed ${esc(fmtAge(Date.now() - p.anthropicWebCredits.capturedAt))}</span>` : `<span>not yet imported</span>`}
           </div>
           ${renderAnthropicImportForm(p.anthropicWebCredits)}
         </div>
       </div>` : ""}
-      <div class="source-row">
+      ${isAntigravity ? "" : `<div class="source-row">
         <span class="source-index">${isAnthropic ? "03" : "02"}</span>
         <div>
           <div class="source-title"><strong>${isWarp ? "Manual add-on record" : "Local run telemetry"}</strong><span class="source-badge is-local">${isWarp ? "manual" : "local"}</span></div>
@@ -326,7 +368,7 @@ function renderProvenance(p) {
                <code>${isAnthropic ? "~/.claude/projects/**/*.jsonl" : "~/.codex/sessions/**/*.jsonl"}</code>
                <div class="source-links"><a href="/runs?refresh=1" target="_blank">raw run report ↗</a></div>`}
         </div>
-      </div>
+      </div>`}
       ${rawLimits ? `<details class="raw-evidence">
         <summary>Raw scoped-limit evidence</summary>
         <pre>${esc(JSON.stringify(rawLimits, null, 2))}</pre>
@@ -366,13 +408,13 @@ function renderWindowCard(p) {
   </div>`;
 
   let chips = "";
-  if (extra.planType) chips += `<span class="info-chip">plan: ${extra.planType}</span>`;
+  if (extra.planType) chips += `<span class="info-chip">plan: ${esc(extra.planType)}</span>`;
   if (extra.bankedResetCreditsAvailable != null) {
-    chips += `<span class="info-chip">banked reset credits: ${extra.bankedResetCreditsAvailable}</span>`;
+    chips += `<span class="info-chip">banked reset credits: ${esc(extra.bankedResetCreditsAvailable)}</span>`;
   }
 
-  // Per-model windows (e.g. Anthropic's temporary Fable bucket) — renders as
-  // a meter row per bucket dynamically; zero UI change when there are none.
+  // Per-model windows (e.g. Anthropic's temporary Fable bucket, Antigravity
+  // model/group buckets) — renders as a meter row per bucket dynamically.
   const modelWindows = snap?.modelWindows ?? {};
   const modelWindowNames = Object.keys(modelWindows);
   let modelWindowsHtml = "";
@@ -383,11 +425,11 @@ function renderWindowCard(p) {
         const color = usageColor(w.usedPercent);
         return `<div class="model-window-row">
           <div class="model-window-meta">
-            <span class="model-window-name">${name}</span>
+            <span class="model-window-name">${esc(name)}</span>
             <span class="model-window-value">${w.usedPercent.toFixed(0)}%</span>
           </div>
           <div class="model-window-track"><div class="model-window-fill" style="width:${Math.min(100, w.usedPercent)}%; background:${color};"></div></div>
-          <div class="model-window-reset">resets ${fmtCountdown(w.resetsAt)}</div>
+          <div class="model-window-reset">resets ${esc(fmtCountdown(w.resetsAt))}</div>
         </div>`;
       })
       .join("");
@@ -448,7 +490,7 @@ function renderPoolCard(p) {
     gauges: `<div class="pool-block">
       <div class="pool-numbers">
         <span class="value">${pool.used.toLocaleString()} <span class="muted">/ ${pool.limit.toLocaleString()}</span></span>
-        <span class="cadence">${pool.cadence ?? ""}</span>
+        <span class="cadence">${esc(pool.cadence ?? "")}</span>
       </div>
       <div class="pool-track"><div class="pool-fill" style="width:${Math.min(100, pool.usedPercent)}%; background:${color};"></div></div>
       <div class="pool-reset">refreshes ${fmtCountdown(pool.refreshesAt)}</div>
@@ -474,20 +516,20 @@ function renderCard(p, runs) {
 
   const manualChips = (p.manualEntries ?? [])
     .filter((m) => m.field !== "claude_web_credit_snapshot")
-    .map((m) => `<span class="info-chip">manual: ${m.field} = ${m.value}${m.note ? ` (${m.note})` : ""}</span>`)
+    .map((m) => `<span class="info-chip">manual: ${esc(m.field)} = ${esc(m.value)}${m.note ? ` (${esc(m.note)})` : ""}</span>`)
     .join("");
 
   const accentColor = statusColorVar(p.status);
   const accentGlow = statusGlowVar(p.status);
-  const note = p.error ? `<p class="card-note">${p.error}</p>` : "";
+  const note = p.error ? `<p class="card-note">${esc(p.error)}</p>` : "";
   const link = PURCHASE_LINKS[p.provider];
 
   return `
     <article class="card" data-provider="${esc(p.provider)}" style="--card-accent: ${accentColor}; --card-accent-glow: ${accentGlow};">
       <div class="card-head">
         <div class="card-title-group">
-          <span class="card-title">${PROVIDER_LABEL[p.provider]}</span>
-          <span class="card-meta">${PROVIDER_SUB[p.provider]}</span>
+          <span class="card-title">${esc(PROVIDER_LABEL[p.provider] ?? p.provider)}</span>
+          <span class="card-meta">${esc(PROVIDER_SUB[p.provider] ?? "")}</span>
         </div>
         ${statusPill(p.status)}
       </div>
@@ -499,8 +541,8 @@ function renderCard(p, runs) {
       ${renderProvenance(p)}
       ${renderRunHistory(p.provider, runs, p.snapshot)}
       <div class="card-footer">
-        <a class="purchase-link" href="${link}" target="_blank" rel="noopener">manage / purchase ↗</a>
-        <span class="card-age">source: ${p.source ?? "-"} · age: ${fmtAge(p.dataAgeMs)}</span>
+        ${link ? `<a class="purchase-link" href="${esc(link)}" target="_blank" rel="noopener">manage / purchase ↗</a>` : `<span></span>`}
+        <span class="card-age">source: ${esc(p.source ?? "-")} · age: ${esc(fmtAge(p.dataAgeMs))}</span>
       </div>
     </article>`;
 }
@@ -513,7 +555,9 @@ function overallState(providers) {
     ...providers.flatMap((p) => {
       if (!p.snapshot) return [];
       if (p.snapshot.kind === "window") {
-        return [p.snapshot.fiveHour?.usedPercent, p.snapshot.weekly?.usedPercent].filter((v) => v != null);
+        const primary = [p.snapshot.fiveHour?.usedPercent, p.snapshot.weekly?.usedPercent].filter((v) => v != null);
+        if (primary.length > 0) return primary;
+        return Object.values(p.snapshot.modelWindows ?? {}).map((w) => w?.usedPercent).filter((v) => v != null);
       }
       return [p.snapshot.pool.usedPercent];
     }),
@@ -542,7 +586,7 @@ async function loadUsage() {
     badge.querySelector(".overall-text").textContent =
       state === "ok" ? "All systems nominal" : state === "warning" ? "Headroom tightening" : "Needs attention";
   } catch (err) {
-    document.getElementById("cards").innerHTML = `<p class="card-note">Could not reach the quota-service server. Is <code>bun run serve</code> running? (${err})</p>`;
+    document.getElementById("cards").innerHTML = `<p class="card-note">Could not reach the quota-service server. Is <code>bun run serve</code> running? (${esc(err)})</p>`;
   }
 }
 
@@ -567,14 +611,14 @@ async function selectProfile(profile) {
     const est = r.estimate.tokenRangeByTier[r.estimate.rubricTier];
     const rec = r.recommendation;
     box.innerHTML = `
-      ${rec ? `<div class="recommend-pick">${PROVIDER_LABEL[rec.provider] ?? rec.provider} — ${rec.model}</div>` : `<div class="recommend-pick">no usable pick</div>`}
-      <div class="recommend-reason">${r.reason}</div>
-      <div class="recommend-alt">est. ${est.low.toLocaleString()}–${est.high.toLocaleString()} tokens (typical ~${est.typical.toLocaleString()}) at rubric tier "${r.estimate.rubricTier}"</div>
-      ${r.alternates.length ? `<div class="recommend-alt">alternates: ${r.alternates.map((a) => `${a.provider}/${a.model} (${a.headroomPercent != null ? a.headroomPercent.toFixed(0) + "%" : "?"})`).join(", ")}</div>` : ""}
-      ${r.warnings.length ? `<div class="recommend-warning">${r.warnings.join("<br>")}</div>` : ""}
+      ${rec ? `<div class="recommend-pick">${esc(PROVIDER_LABEL[rec.provider] ?? rec.provider)} — ${esc(rec.model)}</div>` : `<div class="recommend-pick">no usable pick</div>`}
+      <div class="recommend-reason">${esc(r.reason)}</div>
+      <div class="recommend-alt">est. ${est.low.toLocaleString()}–${est.high.toLocaleString()} tokens (typical ~${est.typical.toLocaleString()}) at rubric tier "${esc(r.estimate.rubricTier)}"</div>
+      ${r.alternates.length ? `<div class="recommend-alt">alternates: ${r.alternates.map((a) => `${esc(PROVIDER_LABEL[a.provider] ?? a.provider)}/${esc(a.model)} (${a.headroomPercent != null ? a.headroomPercent.toFixed(0) + "%" : "?"})`).join(", ")}</div>` : ""}
+      ${r.warnings.length ? `<div class="recommend-warning">${r.warnings.map(esc).join("<br>")}</div>` : ""}
     `;
   } catch (err) {
-    box.innerHTML = `<p class="card-note">recommend failed: ${err}</p>`;
+    box.innerHTML = `<p class="card-note">recommend failed: ${esc(err)}</p>`;
   }
 }
 

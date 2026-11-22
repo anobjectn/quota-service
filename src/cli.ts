@@ -32,7 +32,7 @@ async function tryServer(path: string): Promise<unknown | null> {
 }
 
 function providerLabel(p: Provider): string {
-  return { codex: "Codex", anthropic: "Anthropic", warp: "Warp" }[p];
+  return { codex: "Codex", anthropic: "Anthropic", warp: "Warp", antigravity: "Antigravity" }[p];
 }
 
 function pad(s: string, len: number): string {
@@ -43,7 +43,7 @@ function renderProviderLine(p: ProviderReport): string[] {
   const lines: string[] = [];
   const badge = `[${statusBadge(p.status)}]`;
   const age = formatAge(p.dataAgeMs);
-  const header = `${pad(providerLabel(p.provider), 10)} ${pad(badge, 13)} age: ${age}  source: ${p.source ?? "-"}`;
+  const header = `${pad(providerLabel(p.provider), 12)} ${pad(badge, 13)} age: ${age}  source: ${p.source ?? "-"}`;
   lines.push(header);
   if (p.snapshot?.kind === "window") {
     if (p.snapshot.fiveHour) {
@@ -65,7 +65,8 @@ function renderProviderLine(p: ProviderReport): string[] {
     const modelWindows = p.snapshot.modelWindows;
     if (modelWindows && Object.keys(modelWindows).length > 0) {
       for (const [name, w] of Object.entries(modelWindows)) {
-        lines.push(`    ${name} weekly:  ${w.usedPercent.toFixed(1)}%  resets ${formatCountdown(w.resetsAt)}`);
+        const label = p.provider === "anthropic" ? `${name} weekly` : name;
+        lines.push(`    ${label}:  ${w.usedPercent.toFixed(1)}%  resets ${formatCountdown(w.resetsAt)}`);
       }
     }
     const credits = p.snapshot.usageCredits;
@@ -162,12 +163,12 @@ async function cmdResets(json: boolean): Promise<void> {
   console.log("");
   for (const w of r.windows) {
     console.log(
-      `${pad(providerLabel(w.provider), 10)} ${pad(w.window, 10)} ${w.usedPercent.toFixed(1)}%  resets ${formatCountdown(w.resetsAt)}`,
+      `${pad(providerLabel(w.provider), 12)} ${pad(w.window, 10)} ${w.usedPercent.toFixed(1)}%  resets ${formatCountdown(w.resetsAt)}`,
     );
   }
   for (const p of r.pools) {
     console.log(
-      `${pad(providerLabel(p.provider), 10)} pool       ${p.used}/${p.limit} (${p.usedPercent.toFixed(1)}%)  refreshes ${formatCountdown(p.refreshesAt)}`,
+      `${pad(providerLabel(p.provider), 12)} pool       ${p.used}/${p.limit} (${p.usedPercent.toFixed(1)}%)  refreshes ${formatCountdown(p.refreshesAt)}`,
     );
   }
   if (r.codexBankedResetCredits) {
@@ -248,7 +249,7 @@ async function cmdRecommend(args: string[]): Promise<void> {
   }
   console.log(`recommend — ${profile} (rubric tier: ${result.estimate.rubricTier})`);
   if (result.recommendation) {
-    console.log(`  -> ${result.recommendation.provider} / ${result.recommendation.model}`);
+    console.log(`  -> ${providerLabel(result.recommendation.provider)} / ${result.recommendation.model}`);
   } else {
     console.log(`  -> no usable recommendation`);
   }
@@ -256,7 +257,7 @@ async function cmdRecommend(args: string[]): Promise<void> {
   if (result.alternates.length > 0) {
     console.log(`  alternates:`);
     for (const alt of result.alternates) {
-      console.log(`    - ${alt.provider} / ${alt.model} (headroom: ${alt.headroomPercent != null ? alt.headroomPercent.toFixed(1) + "%" : "unknown"})`);
+      console.log(`    - ${providerLabel(alt.provider)} / ${alt.model} (headroom: ${alt.headroomPercent != null ? alt.headroomPercent.toFixed(1) + "%" : "unknown"})`);
     }
   }
   for (const w of result.warnings) {

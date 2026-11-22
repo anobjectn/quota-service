@@ -6,6 +6,7 @@ import { ENABLED_PROVIDERS } from "./config";
 import type { Database } from "bun:sqlite";
 import { getLatestSnapshot, getRecentSnapshotErrors, recordProviderAttempt, saveResetCredits, saveSnapshot } from "./db";
 import { collectAnthropic, ANTHROPIC_POLL_FLOOR_MS } from "./collectors/anthropic";
+import { collectAntigravity, ANTIGRAVITY_POLL_FLOOR_MS } from "./collectors/antigravity";
 import { collectCodexFromApi, collectCodexResetCredits } from "./collectors/codex";
 import { collectWarp } from "./collectors/warp";
 import type { CollectorResult, Provider } from "./types";
@@ -23,6 +24,7 @@ export const POLL_FLOORS_MS: Record<Provider, number> = {
   codex: CODEX_API_POLL_FLOOR_MS,
   anthropic: ANTHROPIC_POLL_FLOOR_MS,
   warp: WARP_READ_FLOOR_MS,
+  antigravity: ANTIGRAVITY_POLL_FLOOR_MS,
 };
 
 /** Hard ceiling on a single collect-on-query re-collect attempt so an HTTP/
@@ -141,6 +143,17 @@ export async function collectWarpAndSave(db: Database): Promise<CollectorResult>
   return recollectOrServeStale(db, "warp", collectWarp, cached);
 }
 
+export async function collectAntigravityAndSave(
+  db: Database,
+  opts: { force?: boolean } = {},
+): Promise<CollectorResult> {
+  const cached = getLatestSnapshot(db, "antigravity");
+  if (!opts.force && isWithinFloor(db, "antigravity", ANTIGRAVITY_POLL_FLOOR_MS)) {
+    return cached!;
+  }
+  return recollectOrServeStale(db, "antigravity", collectAntigravity, cached);
+}
+
 export async function collectAll(
   db: Database,
   opts: { force?: boolean } = {},
@@ -190,4 +203,5 @@ const DEFAULT_COLLECTOR_RUNNERS: CollectorRunners = {
   codex: collectCodexAndSave,
   anthropic: collectAnthropicAndSave,
   warp: (db) => collectWarpAndSave(db),
+  antigravity: collectAntigravityAndSave,
 };

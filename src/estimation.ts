@@ -37,6 +37,14 @@
 
 import type { Provider } from "./types";
 import type { UsageReport, ProviderReport } from "./present";
+import {
+  ALL_GEMINI_IDENTITY,
+  coerceModelIdentity,
+  identityConstrainsModel,
+  modelIdIdentity,
+  widenUnknownGeminiModel,
+  type ModelIdentity,
+} from "./model-identity";
 
 export type TaskProfile = "small_fix" | "feature" | "large_refactor" | "research";
 
@@ -139,6 +147,7 @@ interface ModelOption {
   provider: Provider;
   tier: ModelTier;
   model: string;
+  modelIds?: readonly string[];
 }
 
 /** Model roster per the handoff's instructions. Names are the harness-facing
@@ -151,10 +160,18 @@ const ROSTER: ModelOption[] = [
   { provider: "codex", tier: "light", model: "GPT-5.x low/mini tier" },
   { provider: "codex", tier: "mid", model: "GPT-5.x standard tier" },
   { provider: "codex", tier: "frontier", model: "GPT-5.x high tier" },
+  { provider: "antigravity", tier: "light", model: "Gemini 3.8 Flash", modelIds: ["gemini-3.8-flash"] },
+  { provider: "antigravity", tier: "mid", model: "Gemini 4 Argon", modelIds: ["gemini-4-argon"] },
+  { provider: "antigravity", tier: "frontier", model: "Gemini 4 Neon", modelIds: ["gemini-4-neon"] },
   { provider: "warp", tier: "light", model: "Luna" },
   { provider: "warp", tier: "mid", model: "Terra" },
   { provider: "warp", tier: "frontier", model: "Sol (high)" },
 ];
+
+/** Exact model IDs of the Antigravity candidates above. */
+const ANTIGRAVITY_MODEL_IDS: ReadonlySet<string> = new Set(
+  ROSTER.filter((o) => o.provider === "antigravity").flatMap((o) => [...(o.modelIds ?? [])]),
+);
 
 const TIER_ORDER: ModelTier[] = ["light", "mid", "frontier"];
 
@@ -196,6 +213,88 @@ function computeAnthropicFrontierHeadroom(report: ProviderReport): ProviderHeadr
   return { ...base, headroomPercent: minHeadroom, constraint };
 }
 
+function minPrimaryWindowHeadroom(
+  fiveHour: { usedPercent: number } | null,
+  weekly: { usedPercent: number } | null,
+): { headroomPercent: number | null; constraint: string | null } {
+  let minHeadroom: number | null = null;
+  let constraint: string | null = null;
+  for (const [label, w] of [
+    ["5h", fiveHour],
+    ["weekly", weekly],
+  ] as const) {
+    if (!w || !Number.isFinite(w.usedPercent)) continue;
+    const headroom = 100 - w.usedPercent;
+    if (minHeadroom === null || headroom < minHeadroom) {
+      minHeadroom = headroom;
+      constraint = `${label} window`;
+    }
+  }
+  return { headroomPercent: minHeadroom, constraint };
+}
+
+/** Returns each model window's identity. Snapshots from the Antigravity
+ * collector carry one identity per window in `extra.modelWindowIdentity`, and
+ * that record is authoritative: a window it lists without an identity (a
+ * partner pool) binds no candidate. A window it does not list, and every
+ * window of a snapshot without the record, binds every Gemini candidate. A
+ * Gemini model ID that no Antigravity candidate holds also binds every Gemini
+ * candidate (see `widenUnknownGeminiModel`). */
+function modelWindowIdentityLookup(extra: Record<string, unknown> | undefined): (name: string) => ModelIdentity {
+  const typed = extra?.modelWindowIdentity;
+  const record =
+    typed && typeof typed === "object" && !Array.isArray(typed) ? (typed as Record<string, unknown>) : {};
+  return (name) =>
+    Object.hasOwn(record, name)
+      ? widenUnknownGeminiModel(coerceModelIdentity(record[name]), ANTIGRAVITY_MODEL_IDS)
+      : ALL_GEMINI_IDENTITY;
+}
+
+/** For Antigravity candidates, the binding constraint is the MINIMUM headroom
+ * across any shared limits (`fiveHour`, `weekly`) AND any `modelWindows` entry
+ * whose identity (see `modelWindowIdentityLookup`) limits that candidate: a
+ * model window limits only the candidate with the same exact model ID; a
+ * Gemini model ID no candidate holds (a variant such as "gemini-4-argon-lite"
+ * or a "-preview" rename) and an all-Gemini window limit every Gemini
+ * candidate; partner and image windows limit none. Unrelated models'
+ * buckets are never borrowed: if neither shared limits nor a matching model
+ * window exist for a candidate, its headroom is `null` (unknown) so ranking
+ * falls back honestly to a measured tier. */
+function computeAntigravityCandidateHeadroom(
+  report: ProviderReport,
+  option: ModelOption,
+): ProviderHeadroom {
+  const base = computeHeadroom(report);
+  if (report.status === "unavailable" || !report.snapshot || report.snapshot.kind !== "window") {
+    return base;
+  }
+
+  let { headroomPercent: minHeadroom, constraint } = minPrimaryWindowHeadroom(
+    report.snapshot.fiveHour,
+    report.snapshot.weekly,
+  );
+
+  const modelWindows = report.snapshot.modelWindows;
+  if (modelWindows) {
+    const identityOf = modelWindowIdentityLookup(report.snapshot.extra);
+    const candidates = (option.modelIds ?? []).map(modelIdIdentity).filter((c) => c.model !== null);
+
+    for (const [name, w] of Object.entries(modelWindows)) {
+      if (!w || !Number.isFinite(w.usedPercent)) continue;
+      const identity = identityOf(name);
+      if (!candidates.some((candidate) => identityConstrainsModel(identity, candidate))) continue;
+
+      const headroom = 100 - w.usedPercent;
+      if (minHeadroom === null || headroom < minHeadroom) {
+        minHeadroom = headroom;
+        constraint = /window$/i.test(name) ? name : `${name} window`;
+      }
+    }
+  }
+
+  return { ...base, headroomPercent: minHeadroom, constraint };
+}
+
 /** The binding constraint for a provider is whichever tracked window/pool is
  * closest to exhaustion — that's what will actually block further work. */
 function computeHeadroom(report: ProviderReport): ProviderHeadroom {
@@ -214,15 +313,31 @@ function computeHeadroom(report: ProviderReport): ProviderHeadroom {
   let minHeadroom: number | null = null;
   let constraint: string | null = null;
   if (report.snapshot.kind === "window") {
-    for (const [label, w] of [
-      ["5h", report.snapshot.fiveHour],
-      ["weekly", report.snapshot.weekly],
-    ] as const) {
-      if (!w) continue;
-      const headroom = 100 - w.usedPercent;
-      if (minHeadroom === null || headroom < minHeadroom) {
-        minHeadroom = headroom;
-        constraint = `${label} window`;
+    ({ headroomPercent: minHeadroom, constraint } = minPrimaryWindowHeadroom(
+      report.snapshot.fiveHour,
+      report.snapshot.weekly,
+    ));
+    // Antigravity: a model window that limits every Gemini text model always
+    // counts toward provider headroom. When there is no 5h/weekly window (the
+    // per-model fallbacks), every window that limits a Gemini text model
+    // counts. Image and partner windows never do, so an image- or
+    // partner-only snapshot leaves provider headroom unknown.
+    if (report.provider === "antigravity" && report.snapshot.modelWindows) {
+      const hasPrimary = minHeadroom !== null;
+      const identityOf = modelWindowIdentityLookup(report.snapshot.extra);
+      const entries = Object.entries(report.snapshot.modelWindows).filter(
+        ([, w]) => w != null && Number.isFinite(w.usedPercent),
+      );
+      const preferred = entries.filter(([name]) => {
+        const identity = identityOf(name);
+        return identity.family === ALL_GEMINI_IDENTITY.family && (!hasPrimary || identity.model === null);
+      });
+      for (const [name, w] of preferred) {
+        const headroom = 100 - w.usedPercent;
+        if (minHeadroom === null || headroom < minHeadroom) {
+          minHeadroom = headroom;
+          constraint = /window$/i.test(name) ? name : `${name} window`;
+        }
       }
     }
   } else if (report.snapshot.kind === "pool") {
@@ -283,7 +398,9 @@ export function recommendModel(taskProfile: TaskProfile, usage: UsageReport): Re
       const report = usage.providers.find((provider) => provider.provider === r.provider);
       const h = r.provider === "anthropic" && tier === "frontier" && report
         ? computeAnthropicFrontierHeadroom(report)
-        : headroomByProvider.find((candidate) => candidate.provider === r.provider);
+        : r.provider === "antigravity" && report
+          ? computeAntigravityCandidateHeadroom(report, r)
+          : headroomByProvider.find((candidate) => candidate.provider === r.provider);
       if (!h) return [];
       return {
         provider: r.provider,

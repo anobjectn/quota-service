@@ -23,12 +23,12 @@ know whether what you're looking at is current.
 ## Provider selection
 
 `QUOTA_PROVIDERS` is an ordered, comma-separated list containing `codex`,
-`anthropic`, and/or `warp`. When it is unset, the service enables
-`codex,anthropic`; Warp is supported but opt-in. Copy `.env.example` to `.env`
-and add `warp` when this machine should collect it:
+`anthropic`, `warp`, and/or `antigravity`. When it is unset, the service enables
+`codex,anthropic`; Warp and Antigravity are supported and opt-in. Copy `.env.example` to `.env`
+and add `warp` or `antigravity` when this machine should collect them:
 
 ```dotenv
-QUOTA_PROVIDERS=codex,anthropic,warp
+QUOTA_PROVIDERS=codex,anthropic,antigravity
 QUOTA_PORT=8787
 ```
 
@@ -138,6 +138,7 @@ this file only accumulates what the collectors observed.
 | Codex reset credits | GET `.../wham/rate-limit-reset-credits` — **report only**, this service never calls the `/consume` endpoint | same as above | same as above |
 | Anthropic | GET `api.anthropic.com/api/oauth/usage` with required `anthropic-beta: oauth-2025-04-20` and `User-Agent: claude-code/<version>` headers | in-memory only | macOS Keychain item **"Claude Code-credentials"**, re-read fresh every poll via `security find-generic-password`, never persisted |
 | Warp | `defaults read dev.warp.Warp-Stable AIRequestLimitInfo` (Warp stores this key as a JSON string, so it parses directly) | plist mtime as data-age signal | none — no credentials involved |
+| Antigravity | Tactic A (`antigravity_local`, macOS `ps` + `lsof`): detects local Antigravity `language_server`/`agy` and calls read-only Connect-RPC (`RetrieveUserQuotaSummary`, `GetUserStatus`, `GetCommandModelConfigs`) over loopback (`127.0.0.1` / `[::1]`). Tactic B (`antigravity_api`): read-only Cloud Code OAuth (`loadCodeAssist` -> `retrieveUserQuotaSummary`, fallback `fetchAvailableModels` / `retrieveUserQuota`). Structured summary endpoints populate `fiveHour`/`weekly`; per-model fallback endpoints report named entries in `modelWindows` (and `model:<name>` in `/resets` and `/history`) without guessing cadence | in-memory only (60s poll floor) | Local CSRF token from process args, or on Antigravity 2.34+ (`--standalone`) from the language server's `ANTIGRAVITY_SERVER_CSRF_TOKEN` environment variable (read with `ps eww` for that one process; no other variable is kept), or tokenless `agy`; or read-only OAuth credentials from `ANTIGRAVITY_OAUTH_CREDENTIALS_JSON`, `QUOTA_ANTIGRAVITY_AUTH_PATH`, `~/.gemini/antigravity-cli/antigravity-oauth-token`, `~/.gemini/oauth_creds.json` (Gemini CLI OAuth token reused with Antigravity Hub client identity required by Cloud Code), or `~/.codexbar/antigravity/oauth_creds.json`; never writes/refreshes tokens or calls `onboardUser` |
 
 ### Codex freshness upgrade, concretely
 
@@ -213,6 +214,56 @@ weekly / any present per-model window has the least headroom, and the
 `reason` string names it (e.g. `"...on its Fable weekly window"` or
 `"...on its 5h window"`). A fresh per-model bucket can make the frontier tier
 cheaper to recommend even when the all-models weekly window is tight.
+
+For Antigravity, each window records the models it limits. Free-text labels
+are never read for model or pool names. The supported inputs are:
+
+- **Exact model IDs.** A per-model entry's `modelId` (effort suffixes such as
+  `-high` and `-001` releases removed, and a whole `models/` or
+  `projects/<p>/[locations/<l>/][publishers/<p>/]models/` resource prefix)
+  limits only that model. Only the entry's own `modelId` counts:
+  `modelOrAlias` (model or alias) is never read as a model ID, and a
+  `modelId` that is malformed or not a canonical ID limits every Gemini text
+  model even when the entry's label is a pool name. An ID
+  that still ends in an effort or release suffix after one is removed
+  (`-high-high`, `-high-001`) is not a model ID.
+- **Summary groups the server names.** A `RetrieveUserQuotaSummary` group
+  whose `name` is a model ID in the same server's `GetUserStatus` model list,
+  or whose display name only one listed model ID has (for example the
+  "Gemini 4 Argon" group), limits only that model. Every listed entry counts
+  when checking that, including blank keys and keys that are not model IDs.
+  A `name` is read only as a model ID or a pool name, and a display name only
+  as a display name or a pool name (never parsed as an ID). When the group has
+  both, both must give the same answer. A per-model entry's own `modelId` is trusted as given: a `claude-`
+  or `gpt-` ID is a partner model and limits no Gemini model.
+- **Pool names.** A group or entry whose whole supplied name is "Claude and
+  GPT models" (the partner pool in real 2.34 payloads) limits no Gemini model.
+  One whose whole name is "Image generation", or whose model ID is an image
+  model (`imagen-*`, or an ID ending in `-image` or `-image-preview` such as
+  `gemini-3-pro-image-preview`), limits image generation only, so using up
+  image quota never changes the text recommendation. "Image generation" is
+  provisional: Antigravity 2.34 reports no separate image quota group, so no
+  payload has shown the real name yet. Names are compared whole, ignoring
+  case and spacing, and only when the payload supplied them (a label made up
+  from a model ID never counts).
+
+Everything else limits every Gemini text model, by design. That includes the
+shared "Gemini Models" group, a group whose fields disagree, a display name
+that two listed models share, a Gemini model ID none of the recommended
+models has (such as `gemini-4-argon-preview`), any other pool name (even one
+that contains the partner or image words, such as "Text and image
+generation"), windows saved without an identity record, and malformed
+identity records. This fails closed: an unrecognized pool that runs out makes
+every Gemini text model look exhausted, and on Google AI Pro Argon's separate
+weekly quota is still limited by the shared Gemini windows too. On the
+fallback paths an Argon-only exhaustion also blocks every Gemini model: the
+Cloud Code summary has no model list, so it treats the Argon group as shared,
+and the per-model `GetUserStatus` fallback lists "Orchestrator (Argon)" under
+an ID (`gemini-pro-orchestrator-g1-pro`) that no recommended model has. New
+pool names are added only from a captured payload. Provider-level headroom
+counts every window that limits all Gemini text models, plus, when there is no
+5h or weekly window, every model-specific Gemini window; image and partner
+windows never count, and with none of these it is unknown.
 
 ### Warp: manual entry for add-on credits
 
@@ -291,7 +342,7 @@ the root cause above:**
 **The stale-status rule.** Independent of what the last collector run
 reported, a provider whose collector hasn't actually *run* in over 3x its
 poll floor (`POLL_FLOORS_MS` in `src/collect.ts`: Codex 60s, Anthropic 180s,
-Warp 60s) is presented as `"stale"` in `src/present.ts`, with an explanatory
+Warp 60s, Antigravity 60s) is presented as `"stale"` in `src/present.ts`, with an explanatory
 note. This is keyed off **when the collector last ran** (`capturedAt`), not
 the age of the underlying data (`dataAsOf`) — those two diverge for a tactic
 like Warp's plist read, where `dataAsOf` tracks Warp's own last-usage
@@ -416,9 +467,10 @@ their sign-off. Designed-but-not-built shape, for whoever picks this up:
 
 - `get_usage` — same data as `quota json`, refreshed on call (best-effort,
   respecting poll floors).
-- `get_resets` — natural 5h/weekly/pool reset times plus Codex's banked reset
-  credits (`available_count`, `total_earned_count`, each credit's status and
-  expiry). Report-only, as above.
+- `get_resets` — natural 5h/weekly/pool reset times (including Antigravity
+  `model:<name>` windows) plus Codex's banked reset credits
+  (`available_count`, `total_earned_count`, each credit's status and expiry).
+  Report-only, as above.
 - `estimate_cost({ taskProfile? })` — v1.5 heuristic token-range estimate
   (see `src/estimation.ts` for the full calibration-provenance comment).
   Returns real structured data, no longer a stub.
