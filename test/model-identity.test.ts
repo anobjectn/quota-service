@@ -44,6 +44,9 @@ describe("canonicalModelId", () => {
     ["Gemini/models/imagen-4", null],
     ["projects/p/locations/global/publishers/google/models/gemini-4-argon", "gemini-4-argon"],
     ["imagen-001", null],
+    // A second suffix left after one strip means the value is not a model ID.
+    ["gemini-4-neon-high-high", null],
+    ["gemini-4-neon-high-001", null],
     ["", null],
   ])("%s", (raw, expected) => {
     expect(canonicalModelId(raw)).toBe(expected);

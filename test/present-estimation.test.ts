@@ -370,6 +370,10 @@ test("per-model entries are identified only by their exact model ID", () => {
     { label: "Argon", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
     { label: "Odd", modelId: "gemini-4-neon-high-high", quotaInfo: { remainingFraction: 0 } },
   ]))).toBe("Gemini 4 Argon@0");
+  expect(recommendFrom(normalizeModelConfigs([
+    { label: "Argon", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
+    { label: "Odd", modelId: "gemini-4-neon-high-001", quotaInfo: { remainingFraction: 0 } },
+  ]))).toBe("Gemini 4 Argon@0");
   // Labels that are Object.prototype names are ordinary keys.
   const proto = normalizeModelConfigs([
     { label: "constructor", modelId: "gemini-4-neon", quotaInfo: { remainingFraction: 0 } },
@@ -489,6 +493,11 @@ test("a summary group is model-specific only when the server's model list names 
       { id: "gemini-4-argon", displayName: "Gemini 4" },
     ]),
     summary({ name: "gemini-text-and-image-pool", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
+    // A doubly suffixed group name the model list includes narrows nothing.
+    summary({ name: "gemini-4-neon-high-high", displayName: "Odd", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }, [
+      ...KNOWN_MODELS,
+      { id: "gemini-4-neon-high", displayName: "Odd" },
+    ]),
     // A model-ID-shaped display name two listed models share, and a display
     // name a blank model-list key shares, narrow nothing.
     summary({ displayName: "gemini-4-neon", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }, [

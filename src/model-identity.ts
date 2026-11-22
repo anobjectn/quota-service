@@ -68,8 +68,11 @@ export function canonicalModelId(value: string | null | undefined): string | nul
   const id = value.trim().toLowerCase().replace(RESOURCE_PREFIX_RE, "");
   if (!MODEL_ID_RE.test(id)) return null;
   const stripped = id.replace(EFFORT_SUFFIX_RE, "").replace(RELEASE_SUFFIX_RE, "");
-  // "gemini-high" or "imagen-001" leave only the prefix: not a model ID.
-  return MODEL_ID_RE.test(stripped) ? stripped : null;
+  // "gemini-high" or "imagen-001" leave only the prefix, and "x-high-high" or
+  // "x-high-001" keep a suffix: neither is a model ID. This makes the result
+  // stable, so no caller can narrow an ID twice.
+  if (!MODEL_ID_RE.test(stripped) || EFFORT_SUFFIX_RE.test(stripped) || RELEASE_SUFFIX_RE.test(stripped)) return null;
+  return stripped;
 }
 
 /** The identity of an exact API model ID; `NO_MODEL_IDENTITY` when the value is

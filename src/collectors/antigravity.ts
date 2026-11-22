@@ -727,46 +727,45 @@ function normalizeDisplayName(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-/** The identity one group field (its `name` or its display name) gives:
- * - a model ID the server lists: that exact model;
- * - an image model ID ("imagen-4"): image generation; any other model ID the
- *   server does not list ("gemini-4", "claude-gpt-pool"): every Gemini model;
- * - a display name that only one listed model ID has: that model; a display
- *   name that two or more listed entries with different IDs share, or that an
- *   entry without a model ID has, means every Gemini model;
- * - otherwise the whole-name pool rule (`poolNameIdentity`). */
-function resolveGroupFieldIdentity(value: string, knownModels: readonly KnownModel[]): ModelIdentity {
-  const id = canonicalModelId(value);
-  const listedId = id !== null && knownModels.some((m) => m.id === id) ? id : null;
-  // Display names are checked first, even when the text looks like a model ID
-  // ("gemini-4-neon" shown for two models): every listed entry with that
-  // display name, plus the listed ID the text itself names, must be one model.
-  const display = normalizeDisplayName(value);
+/** The identity a group's `name` gives. A name is read only as a model ID or a
+ * pool name: a model ID the server lists is that exact model; an image model
+ * ID ("imagen-4") is image generation; any other model ID ("gemini-4",
+ * "claude-gpt-pool") is every Gemini model; otherwise the whole-name pool rule
+ * (`poolNameIdentity`). */
+function resolveGroupNameIdentity(name: string, knownModels: readonly KnownModel[]): ModelIdentity {
+  const id = canonicalModelId(name);
+  if (id === null) return poolNameIdentity(name);
+  if (knownModels.some((m) => m.id === id)) return modelIdIdentity(id);
+  return modelIdIdentity(id).family === IMAGE_GENERATION_IDENTITY.family ? IMAGE_GENERATION_IDENTITY : ALL_GEMINI_IDENTITY;
+}
+
+/** The identity a group's display name gives. A display name is read only as a
+ * display name or a pool name, never parsed as an ID: when exactly one listed
+ * model ID has it, that model; when listed entries share it (including entries
+ * without a model ID), every Gemini model; with no match, the whole-name pool
+ * rule. */
+function resolveGroupDisplayIdentity(displayName: string, knownModels: readonly KnownModel[]): ModelIdentity {
+  const display = normalizeDisplayName(displayName);
   const matches = knownModels.filter((m) => m.displayName !== null && normalizeDisplayName(m.displayName) === display);
-  if (matches.length > 0) {
-    const ids = new Set(matches.map((m) => m.id));
-    if (listedId !== null) ids.add(listedId);
-    const [only] = [...ids];
-    return ids.size === 1 && only ? modelIdIdentity(only) : ALL_GEMINI_IDENTITY;
-  }
-  if (listedId !== null) return modelIdIdentity(listedId);
-  if (id !== null) {
-    return modelIdIdentity(id).family === IMAGE_GENERATION_IDENTITY.family ? IMAGE_GENERATION_IDENTITY : ALL_GEMINI_IDENTITY;
-  }
-  return poolNameIdentity(value);
+  if (matches.length === 0) return poolNameIdentity(displayName);
+  const ids = new Set(matches.map((m) => m.id));
+  const [only] = [...ids];
+  return ids.size === 1 && only ? modelIdIdentity(only) : ALL_GEMINI_IDENTITY;
 }
 
 /** The group's identity: every field present must give the same identity
- * (see `resolveGroupFieldIdentity`); any disagreement, or no field, means every
- * Gemini model. Bucket labels and IDs are never read. */
+ * (see `resolveGroupNameIdentity` and `resolveGroupDisplayIdentity`); any
+ * disagreement, or no field, means every Gemini model. Bucket labels and IDs
+ * are never read. */
 function resolveGroupIdentity(
   rawName: string | null,
   displayName: string | null,
   knownModels: readonly KnownModel[],
 ): ModelIdentity {
-  const fields = [rawName, displayName].filter((v): v is string => v !== null);
-  if (fields.length === 0) return ALL_GEMINI_IDENTITY;
-  const identities = fields.map((v) => resolveGroupFieldIdentity(v, knownModels));
+  const identities: ModelIdentity[] = [];
+  if (rawName !== null) identities.push(resolveGroupNameIdentity(rawName, knownModels));
+  if (displayName !== null) identities.push(resolveGroupDisplayIdentity(displayName, knownModels));
+  if (identities.length === 0) return ALL_GEMINI_IDENTITY;
   const [first] = identities as [ModelIdentity, ...ModelIdentity[]];
   return identities.every((i) => i.model === first.model && i.family === first.family) ? first : ALL_GEMINI_IDENTITY;
 }

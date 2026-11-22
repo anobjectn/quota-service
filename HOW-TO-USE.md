@@ -221,15 +221,17 @@ are never read for model or pool names. The supported inputs are:
 - **Exact model IDs.** A per-model entry's `modelId` (effort suffixes such as
   `-high` and `-001` releases removed, and a whole `models/` or
   `projects/<p>/[locations/<l>/][publishers/<p>/]models/` resource prefix)
-  limits only that model. An alias is
-  never read as a model ID.
+  limits only that model. An alias is never read as a model ID, and an ID
+  that still ends in an effort or release suffix after one is removed
+  (`-high-high`, `-high-001`) is not a model ID.
 - **Summary groups the server names.** A `RetrieveUserQuotaSummary` group
   whose `name` is a model ID in the same server's `GetUserStatus` model list,
   or whose display name only one listed model ID has (for example the
   "Gemini 4 Argon" group), limits only that model. Every listed entry counts
-  when checking that, including entries whose key is not a model ID. When
-  the group has both a name and a display name, both must give the same
-  answer. A per-model entry's own `modelId` is trusted as given: a `claude-`
+  when checking that, including blank keys and keys that are not model IDs.
+  A `name` is read only as a model ID or a pool name, and a display name only
+  as a display name or a pool name (never parsed as an ID). When the group has
+  both, both must give the same answer. A per-model entry's own `modelId` is trusted as given: a `claude-`
   or `gpt-` ID is a partner model and limits no Gemini model.
 - **Pool names.** A group or entry whose whole supplied name is "Claude and
   GPT models" (the partner pool in real 2.34 payloads) limits no Gemini model.
