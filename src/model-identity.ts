@@ -41,8 +41,10 @@ const MODEL_ID_RE = /^(?:gemini|imagen|claude|gpt)-[a-z0-9][a-z0-9.-]*$/;
  * "-image-preview" ("gemini-3-pro-image-preview"). A mid-ID "image" segment
  * ("gemini-text-and-image-pool") is not an image model. */
 const IMAGE_MODEL_ID_RE = /^imagen-|-image(?:-preview)?$/;
-/** A resource-path prefix made only of path segments, ending in "models/". */
-const RESOURCE_PREFIX_RE = /^(?:[a-z0-9._-]+\/)*?models\//;
+/** A Google resource-path prefix: "models/", or "projects/<p>/" with optional
+ * "locations/<l>/" and "publishers/<p>/" segments, then "models/". */
+const RESOURCE_PREFIX_RE =
+  /^(?:projects\/[a-z0-9._-]+\/(?:locations\/[a-z0-9._-]+\/)?(?:publishers\/[a-z0-9._-]+\/)?)?models\//;
 /** Thinking-effort suffixes on Antigravity model IDs ("gemini-4-neon-high"). */
 const EFFORT_SUFFIX_RE = /-(?:minimal|low|medium|high|xhigh)$/;
 /** Numbered releases ("models/gemini-4-argon-001"). */
@@ -125,8 +127,11 @@ export function coerceModelIdentity(raw: unknown): ModelIdentity {
   const { model, family } = raw as { model?: unknown; family?: unknown };
   if (model === null && family === null) return NO_MODEL_IDENTITY;
   if (typeof model === "string") {
-    const identity = modelIdIdentity(model);
-    return identity.model !== null ? identity : ALL_GEMINI_IDENTITY;
+    // The collector stores canonical IDs; read one back only if it is already
+    // canonical, so a stored "gemini-4-neon-high" is never narrowed again.
+    const stored = model.trim().toLowerCase();
+    const identity = modelIdIdentity(stored);
+    return identity.model === stored ? identity : ALL_GEMINI_IDENTITY;
   }
   if (model === null && family === IMAGE_GENERATION_IDENTITY.family) return IMAGE_GENERATION_IDENTITY;
   return ALL_GEMINI_IDENTITY;

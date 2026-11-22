@@ -365,6 +365,19 @@ test("per-model entries are identified only by their exact model ID", () => {
     ];
     expect(recommendFrom(normalizeModelConfigs(order ? entries.reverse() : entries))).toBe("Gemini 4 Argon@1");
   }
+  // A doubly suffixed ID stays an unknown model after the stored record is read back.
+  expect(recommendFrom(normalizeModelConfigs([
+    { label: "Argon", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
+    { label: "Odd", modelId: "gemini-4-neon-high-high", quotaInfo: { remainingFraction: 0 } },
+  ]))).toBe("Gemini 4 Argon@0");
+  // Labels that are Object.prototype names are ordinary keys.
+  const proto = normalizeModelConfigs([
+    { label: "constructor", modelId: "gemini-4-neon", quotaInfo: { remainingFraction: 0 } },
+    { label: "toString", quotaInfo: { remainingFraction: 0.5 } },
+    { label: "Argon", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
+  ]);
+  expect(Object.keys(proto?.modelWindows ?? {}).sort()).toEqual(["Argon", "constructor", "toString"]);
+  expect(recommendFrom(proto)).toBe("Gemini 4 Argon@50");
   // A label generated from an unknown ID is not a pool name, and an alias is not a model ID.
   expect(recommendFrom(normalizeModelConfigs([
     { modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
@@ -476,6 +489,15 @@ test("a summary group is model-specific only when the server's model list names 
       { id: "gemini-4-argon", displayName: "Gemini 4" },
     ]),
     summary({ name: "gemini-text-and-image-pool", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
+    // A model-ID-shaped display name two listed models share, and a display
+    // name a blank model-list key shares, narrow nothing.
+    summary({ displayName: "gemini-4-neon", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }, [
+      { id: "gemini-4-neon", displayName: "gemini-4-neon" },
+      { id: "gemini-4-argon", displayName: "gemini-4-neon" },
+    ]),
+    summary({ displayName: "Standard", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }, extractKnownModels({
+      userStatus: { cascadeModelConfigData: { groupedModels: { "gemini-4-neon": { displayName: "Standard" }, "": { displayName: "Standard" } } } },
+    })),
     summary({ displayName: "Standard", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }, extractKnownModels({
       userStatus: { cascadeModelConfigData: { groupedModels: { "gemini-4-neon": { displayName: "Standard" }, MODEL_PLACEHOLDER_M418: { displayName: "Standard" } } } },
     })),
@@ -631,6 +653,20 @@ test("recommendation treats a window without a recorded identity as limiting eve
   } as UsageReport);
   expect(image.recommendation?.headroomPercent).toBe(90);
   expect(image.headroomByProvider[0]?.headroomPercent).toBe(90);
+  // An exhausted all-Gemini window counts toward provider headroom even when a
+  // 5h window exists.
+  const mixed = recommendModel("feature", {
+    generatedAt: 0,
+    providers: [{
+      provider: "antigravity", status: "ok", source: "antigravity_local", dataAgeMs: 0, capturedAt: 0, manualEntries: [],
+      snapshot: normalizeQuotaSummary({ groups: [
+        { displayName: "Gemini Models", buckets: [{ window: "5h", remainingFraction: 0.9 }] },
+        { displayName: "Unknown shared", buckets: [{ remainingFraction: 0 }] },
+      ] }),
+    }],
+  } as UsageReport);
+  expect(mixed.recommendation?.headroomPercent).toBe(0);
+  expect(mixed.headroomByProvider[0]?.headroomPercent).toBe(0);
   // With no window that limits Gemini text models, provider headroom is unknown.
   for (const only of [
     normalizeModelConfigs([{ label: "Imagen 4", modelId: "imagen-4.0-generate-001", quotaInfo: { remainingFraction: 0 } }]),

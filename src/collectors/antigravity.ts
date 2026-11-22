@@ -711,8 +711,9 @@ export function extractKnownModels(body: GetUserStatusResponse | null | undefine
   const grouped = body?.userStatus?.cascadeModelConfigData?.groupedModels;
   if (!grouped || typeof grouped !== "object" || Array.isArray(grouped)) return [];
   const models: KnownModel[] = [];
+  // Every entry counts, including blank or non-ID keys (id null), so a display
+  // name they share is never mistaken for a unique one.
   for (const [rawId, info] of Object.entries(grouped)) {
-    if (!rawId.trim()) continue;
     models.push({ id: canonicalModelId(rawId), displayName: nonEmptyString(info?.displayName) });
   }
   return models;
@@ -736,16 +737,23 @@ function normalizeDisplayName(value: string): string {
  * - otherwise the whole-name pool rule (`poolNameIdentity`). */
 function resolveGroupFieldIdentity(value: string, knownModels: readonly KnownModel[]): ModelIdentity {
   const id = canonicalModelId(value);
-  if (id !== null) {
-    if (knownModels.some((m) => m.id === id)) return modelIdIdentity(id);
-    return modelIdIdentity(id).family === IMAGE_GENERATION_IDENTITY.family ? IMAGE_GENERATION_IDENTITY : ALL_GEMINI_IDENTITY;
-  }
+  const listedId = id !== null && knownModels.some((m) => m.id === id) ? id : null;
+  // Display names are checked first, even when the text looks like a model ID
+  // ("gemini-4-neon" shown for two models): every listed entry with that
+  // display name, plus the listed ID the text itself names, must be one model.
   const display = normalizeDisplayName(value);
   const matches = knownModels.filter((m) => m.displayName !== null && normalizeDisplayName(m.displayName) === display);
-  if (matches.length === 0) return poolNameIdentity(value);
-  const ids = new Set(matches.map((m) => m.id));
-  const [only] = [...ids];
-  return ids.size === 1 && only ? modelIdIdentity(only) : ALL_GEMINI_IDENTITY;
+  if (matches.length > 0) {
+    const ids = new Set(matches.map((m) => m.id));
+    if (listedId !== null) ids.add(listedId);
+    const [only] = [...ids];
+    return ids.size === 1 && only ? modelIdIdentity(only) : ALL_GEMINI_IDENTITY;
+  }
+  if (listedId !== null) return modelIdIdentity(listedId);
+  if (id !== null) {
+    return modelIdIdentity(id).family === IMAGE_GENERATION_IDENTITY.family ? IMAGE_GENERATION_IDENTITY : ALL_GEMINI_IDENTITY;
+  }
+  return poolNameIdentity(value);
 }
 
 /** The group's identity: every field present must give the same identity
@@ -844,10 +852,11 @@ function recordWindow(
   identity: ModelIdentity,
 ): void {
   let k = key;
-  for (let n = 2; windows[k] && !(identities[k] && sameIdentity(identities[k]!, identity)); n++) {
+  // Own-property checks: a label such as "constructor" is an ordinary key.
+  for (let n = 2; Object.hasOwn(windows, k) && !(Object.hasOwn(identities, k) && sameIdentity(identities[k]!, identity)); n++) {
     k = `${key} #${n}`;
   }
-  const existing = windows[k];
+  const existing = Object.hasOwn(windows, k) ? windows[k] : undefined;
   if (!existing || quota.usedPercent > existing.usedPercent) {
     windows[k] = quota;
     identities[k] = { model: identity.model, family: identity.family };

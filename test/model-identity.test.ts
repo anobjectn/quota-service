@@ -41,6 +41,8 @@ describe("canonicalModelId", () => {
     ["All models/imagen-4", null],
     ["Gemini models/claude-opus-5-5", null],
     ["gemini_models/imagen-4", null],
+    ["Gemini/models/imagen-4", null],
+    ["projects/p/locations/global/publishers/google/models/gemini-4-argon", "gemini-4-argon"],
     ["imagen-001", null],
     ["", null],
   ])("%s", (raw, expected) => {
@@ -126,6 +128,8 @@ describe("coerceModelIdentity", () => {
     expect(coerceModelIdentity({ model: null, family: "gemini-4" })).toEqual(ALL_GEMINI_IDENTITY);
     expect(coerceModelIdentity({ model: "gemini-4-argon", family: "gemini-4" })).toEqual({ model: "gemini-4-argon", family: "gemini" });
     expect(coerceModelIdentity({ model: null, family: null })).toEqual(NO_MODEL_IDENTITY);
+    // A stored ID is read back only when it is already canonical.
+    expect(coerceModelIdentity({ model: "gemini-4-neon-high", family: "gemini" })).toEqual(ALL_GEMINI_IDENTITY);
     // Malformed or unrecognized values limit every Gemini text model.
     for (const raw of ["junk", null, undefined, [], {}, { family: "google" }, { model: "Gemini 4 Argon" }, { model: null, family: "gemini" }]) {
       expect(coerceModelIdentity(raw)).toEqual(ALL_GEMINI_IDENTITY);

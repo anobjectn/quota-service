@@ -220,7 +220,8 @@ are never read for model or pool names. The supported inputs are:
 
 - **Exact model IDs.** A per-model entry's `modelId` (effort suffixes such as
   `-high` and `-001` releases removed, and a whole `models/` or
-  `projects/.../models/` resource prefix) limits only that model. An alias is
+  `projects/<p>/[locations/<l>/][publishers/<p>/]models/` resource prefix)
+  limits only that model. An alias is
   never read as a model ID.
 - **Summary groups the server names.** A `RetrieveUserQuotaSummary` group
   whose `name` is a model ID in the same server's `GetUserStatus` model list,
@@ -247,13 +248,17 @@ that two listed models share, a Gemini model ID none of the recommended
 models has (such as `gemini-4-argon-preview`), any other pool name (even one
 that contains the partner or image words, such as "Text and image
 generation"), windows saved without an identity record, and malformed
-identity records. This fails
-closed: an unrecognized pool that runs out makes every Gemini text model look
-exhausted, the Cloud Code fallback (which has no model list) treats the Argon
-group as shared, and on Google AI Pro Argon's separate weekly quota is still
-limited by the shared Gemini windows too. New pool names are added only from a
-captured payload. Provider-level headroom counts only windows that limit Gemini
-text models; with none, it is unknown.
+identity records. This fails closed: an unrecognized pool that runs out makes
+every Gemini text model look exhausted, and on Google AI Pro Argon's separate
+weekly quota is still limited by the shared Gemini windows too. On the
+fallback paths an Argon-only exhaustion also blocks every Gemini model: the
+Cloud Code summary has no model list, so it treats the Argon group as shared,
+and the per-model `GetUserStatus` fallback lists "Orchestrator (Argon)" under
+an ID (`gemini-pro-orchestrator-g1-pro`) that no recommended model has. New
+pool names are added only from a captured payload. Provider-level headroom
+counts every window that limits all Gemini text models, plus, when there is no
+5h or weekly window, every model-specific Gemini window; image and partner
+windows never count, and with none of these it is unknown.
 
 ### Warp: manual entry for add-on credits
 

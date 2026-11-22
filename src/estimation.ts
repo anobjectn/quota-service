@@ -317,17 +317,21 @@ function computeHeadroom(report: ProviderReport): ProviderHeadroom {
       report.snapshot.fiveHour,
       report.snapshot.weekly,
     ));
-    // When Antigravity only reports per-model buckets (e.g. per-model fallback
-    // when cadence cannot be mapped to 5h/weekly), summarize provider-level
-    // headroom from the modelWindows that limit Gemini text models (by resolved identity).
-    if (minHeadroom === null && report.provider === "antigravity" && report.snapshot.modelWindows) {
+    // Antigravity: a model window that limits every Gemini text model always
+    // counts toward provider headroom. When there is no 5h/weekly window (the
+    // per-model fallbacks), every window that limits a Gemini text model
+    // counts. Image and partner windows never do, so an image- or
+    // partner-only snapshot leaves provider headroom unknown.
+    if (report.provider === "antigravity" && report.snapshot.modelWindows) {
+      const hasPrimary = minHeadroom !== null;
       const identityOf = modelWindowIdentityLookup(report.snapshot.extra);
       const entries = Object.entries(report.snapshot.modelWindows).filter(
         ([, w]) => w != null && Number.isFinite(w.usedPercent),
       );
-      const preferred = entries.filter(([name]) => identityOf(name).family === ALL_GEMINI_IDENTITY.family);
-      // Only windows that limit Gemini text models count; an image- or
-      // partner-only snapshot leaves provider headroom unknown.
+      const preferred = entries.filter(([name]) => {
+        const identity = identityOf(name);
+        return identity.family === ALL_GEMINI_IDENTITY.family && (!hasPrimary || identity.model === null);
+      });
       for (const [name, w] of preferred) {
         const headroom = 100 - w.usedPercent;
         if (minHeadroom === null || headroom < minHeadroom) {
