@@ -226,12 +226,14 @@ are never read for model or pool names. The supported inputs are:
   whose `name` is a model ID in the same server's `GetUserStatus` model list,
   or whose display name only one listed model ID has (for example the
   "Gemini 4 Argon" group), limits only that model. Every listed entry counts
-  when checking that, including entries whose key is not a model ID. When the group has both a
-  name and a display name, both must give the same answer.
+  when checking that, including entries whose key is not a model ID. When
+  the group has both a name and a display name, both must give the same
+  answer. A per-model entry's own `modelId` is trusted as given: a `claude-`
+  or `gpt-` ID is a partner model and limits no Gemini model.
 - **Pool names.** A group or entry whose whole supplied name is "Claude and
   GPT models" (the partner pool in real 2.34 payloads) limits no Gemini model.
   One whose whole name is "Image generation", or whose model ID is an image
-  model (`imagen-*`, or an ID with an `image` segment such as
+  model (`imagen-*`, or an ID ending in `-image` or `-image-preview` such as
   `gemini-3-pro-image-preview`), limits image generation only, so using up
   image quota never changes the text recommendation. "Image generation" is
   provisional: Antigravity 2.34 reports no separate image quota group, so no

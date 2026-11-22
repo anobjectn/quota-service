@@ -475,6 +475,7 @@ test("a summary group is model-specific only when the server's model list names 
       { id: "gemini-4-neon", displayName: "Gemini 4" },
       { id: "gemini-4-argon", displayName: "Gemini 4" },
     ]),
+    summary({ name: "gemini-text-and-image-pool", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
     summary({ displayName: "Standard", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }, extractKnownModels({
       userStatus: { cascadeModelConfigData: { groupedModels: { "gemini-4-neon": { displayName: "Standard" }, MODEL_PLACEHOLDER_M418: { displayName: "Standard" } } } },
     })),

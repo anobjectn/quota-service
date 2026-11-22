@@ -832,19 +832,25 @@ function formatModelWindowKey(
   return baseLabel;
 }
 
-function insertModelWindow(
-  target: Record<string, WindowQuota>,
+/** Records a model window and its identity together. Two windows with the same
+ * identity on one key collapse onto the tighter quota; a window whose key is
+ * already held by a different identity moves to the next free " #n" key, so no
+ * identity is ever overwritten. */
+function recordWindow(
+  windows: Record<string, WindowQuota>,
+  identities: Record<string, ModelIdentity>,
   key: string,
   quota: WindowQuota,
+  identity: ModelIdentity,
 ): void {
-  const existing = target[key];
-  if (!existing) {
-    target[key] = quota;
-    return;
+  let k = key;
+  for (let n = 2; windows[k] && !(identities[k] && sameIdentity(identities[k]!, identity)); n++) {
+    k = `${key} #${n}`;
   }
-  // Keep the tighter constraint when two entries collapse onto the exact same label.
-  if (quota.usedPercent > existing.usedPercent) {
-    target[key] = quota;
+  const existing = windows[k];
+  if (!existing || quota.usedPercent > existing.usedPercent) {
+    windows[k] = quota;
+    identities[k] = { model: identity.model, family: identity.family };
   }
 }
 
@@ -960,15 +966,8 @@ export function normalizeQuotaSummary(
   const modelWindows: Record<string, WindowQuota> = {};
   const modelWindowIdentity: Record<string, ModelIdentity> = {};
 
-  // Record a window and its identity together, keeping the tighter constraint
-  // (and that bucket's identity) when two buckets land on the same key.
-  const recordModelWindow = (key: string, quota: WindowQuota, identity: ModelIdentity): void => {
-    const existing = modelWindows[key];
-    insertModelWindow(modelWindows, key, quota);
-    if (!existing || quota.usedPercent > existing.usedPercent) {
-      modelWindowIdentity[key] = { model: identity.model, family: identity.family };
-    }
-  };
+  const recordModelWindow = (key: string, quota: WindowQuota, identity: ModelIdentity): void =>
+    recordWindow(modelWindows, modelWindowIdentity, key, quota, identity);
 
   const pickBestBucketIndex = (
     buckets: ParsedBucket[],
@@ -1177,17 +1176,9 @@ function normalizeModelEntries(
     // Gemini model.
     const fromId = modelIdIdentity(entry.modelId);
     const identity = fromId.model !== null ? fromId : poolNameIdentity(entry.suppliedLabel);
-    // A generated key can equal another entry's literal label ("Foo [id]"):
-    // windows with different identities never share a key.
-    let key = preferredKey;
-    for (let n = 2; key in modelWindowIdentity && !sameIdentity(modelWindowIdentity[key]!, identity); n++) {
-      key = `${preferredKey} #${n}`;
-    }
-    const existing = modelWindows[key];
-    insertModelWindow(modelWindows, key, entry.quota);
-    if (!existing || entry.quota.usedPercent > existing.usedPercent) {
-      modelWindowIdentity[key] = { model: identity.model, family: identity.family };
-    }
+    // A generated key can equal another entry's literal label ("Foo [id]");
+    // recordWindow never lets windows with different identities share a key.
+    recordWindow(modelWindows, modelWindowIdentity, preferredKey, entry.quota, identity);
   }
 
   const extraFields: Record<string, unknown> =

@@ -9,11 +9,12 @@
  * - A window is model-specific only when the API gives it an exact model ID
  *   (a per-model entry's `modelId`, or a summary group that the same server's
  *   model list names). It then limits only that model.
- * - A pool is recognized by name only when the whole name is one seen in a
- *   real payload: the partner pool "Claude and GPT models" limits no Gemini
- *   model, and the image pool "Image generation" limits only image generation.
- *   An image model ID ("imagen-4", "gemini-3-pro-image-preview") also limits
- *   only image generation.
+ * - A pool is recognized only by its whole supplied name: the partner pool
+ *   "Claude and GPT models" (seen in real 2.34 payloads) limits no Gemini
+ *   model, and "Image generation" (provisional: no captured payload has shown
+ *   an image pool yet) limits only image generation. An image model ID
+ *   ("imagen-4", or one ending in "-image"/"-image-preview") also limits only
+ *   image generation.
  * - Every other window is a Gemini quota of unknown scope and limits every
  *   Gemini text model (fails closed).
  */
@@ -36,8 +37,10 @@ export const ALL_GEMINI_IDENTITY: ModelIdentity = Object.freeze({ model: null, f
 export const IMAGE_GENERATION_IDENTITY: ModelIdentity = Object.freeze({ model: null, family: "image" });
 
 const MODEL_ID_RE = /^(?:gemini|imagen|claude|gpt)-[a-z0-9][a-z0-9.-]*$/;
-/** Image-generation model IDs: "imagen-4", or an "image" segment ("gemini-3-pro-image-preview"). */
-const IMAGE_MODEL_ID_RE = /^imagen-|-image(?:-|$)/;
+/** Image-generation model IDs: "imagen-4", or an ID that ends in "-image" or
+ * "-image-preview" ("gemini-3-pro-image-preview"). A mid-ID "image" segment
+ * ("gemini-text-and-image-pool") is not an image model. */
+const IMAGE_MODEL_ID_RE = /^imagen-|-image(?:-preview)?$/;
 /** A resource-path prefix made only of path segments, ending in "models/". */
 const RESOURCE_PREFIX_RE = /^(?:[a-z0-9._-]+\/)*?models\//;
 /** Thinking-effort suffixes on Antigravity model IDs ("gemini-4-neon-high"). */

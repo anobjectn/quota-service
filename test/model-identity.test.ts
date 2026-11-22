@@ -57,8 +57,10 @@ describe("modelIdIdentity", () => {
   test("image-generation IDs are image models, not Gemini text models", () => {
     expect(modelIdIdentity("imagen-4.0-generate")).toEqual({ model: "imagen-4.0-generate", family: "image" });
     expect(modelIdIdentity("gemini-3-pro-image-preview")).toEqual({ model: "gemini-3-pro-image-preview", family: "image" });
-    // "image" must be a whole ID segment.
+    // "image" must end the ID (optionally "-preview"); a mid-ID segment is not an image model.
     expect(modelIdIdentity("gemini-4-imagery")).toEqual({ model: "gemini-4-imagery", family: "gemini" });
+    expect(modelIdIdentity("gemini-2.5-flash-image")).toEqual({ model: "gemini-2.5-flash-image", family: "image" });
+    expect(modelIdIdentity("gemini-text-and-image-pool")).toEqual({ model: "gemini-text-and-image-pool", family: "gemini" });
   });
 });
 
