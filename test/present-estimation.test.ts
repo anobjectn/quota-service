@@ -382,6 +382,26 @@ test("per-model entries are identified only by their exact model ID", () => {
   ]);
   expect(Object.keys(proto?.modelWindows ?? {}).sort()).toEqual(["Argon", "constructor", "toString"]);
   expect(recommendFrom(proto)).toBe("Gemini 4 Argon@50");
+  // A "__proto__" label is an ordinary key too, and survives serialization.
+  for (const snapshot of [
+    normalizeModelConfigs([
+      { label: "Argon", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
+      { label: "__proto__", quotaInfo: { remainingFraction: 0 } },
+    ]),
+    normalizeQuotaSummary({ groups: [
+      { displayName: "Gemini Models", buckets: [{ window: "5h", remainingFraction: 0.9 }] },
+      { displayName: "__proto__", buckets: [{ remainingFraction: 0 }] },
+    ] }),
+  ]) {
+    const stored = JSON.parse(JSON.stringify(snapshot));
+    expect(Object.getPrototypeOf(snapshot?.modelWindows)).toBe(Object.prototype);
+    expect(Object.keys(stored.modelWindows).some((k) => k.startsWith("__proto__"))).toBe(true);
+    expect(recommendFrom(stored)).toEndWith("@0");
+  }
+  expect(recommendFrom(normalizeModelConfigs([
+    { label: "Argon", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
+    { label: "Odd", modelId: "gemini-4-neon-001-high", quotaInfo: { remainingFraction: 0 } },
+  ]))).toBe("Gemini 4 Argon@0");
   // A label generated from an unknown ID is not a pool name, and an alias is not a model ID.
   expect(recommendFrom(normalizeModelConfigs([
     { modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
@@ -498,6 +518,9 @@ test("a summary group is model-specific only when the server's model list names 
       ...KNOWN_MODELS,
       { id: "gemini-4-neon-high", displayName: "Odd" },
     ]),
+    // A group field that is present but not a string, in either position.
+    summary({ name: { value: "Gemini Models" }, displayName: "Image generation", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
+    summary({ name: "imagen-4", displayName: { value: "x" }, buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
     // A model-ID-shaped display name two listed models share, and a display
     // name a blank model-list key shares, narrow nothing.
     summary({ displayName: "gemini-4-neon", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }, [

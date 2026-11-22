@@ -47,6 +47,7 @@ describe("canonicalModelId", () => {
     // A second suffix left after one strip means the value is not a model ID.
     ["gemini-4-neon-high-high", null],
     ["gemini-4-neon-high-001", null],
+    ["gemini-4-neon-001-high", null],
     ["", null],
   ])("%s", (raw, expected) => {
     expect(canonicalModelId(raw)).toBe(expected);

@@ -719,6 +719,10 @@ export function extractKnownModels(body: GetUserStatusResponse | null | undefine
   return models;
 }
 
+function defineOwn<T>(target: Record<string, T>, key: string, value: T): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
 function sameIdentity(a: ModelIdentity, b: ModelIdentity): boolean {
   return a.model === b.model && a.family === b.family;
 }
@@ -857,8 +861,10 @@ function recordWindow(
   }
   const existing = Object.hasOwn(windows, k) ? windows[k] : undefined;
   if (!existing || quota.usedPercent > existing.usedPercent) {
-    windows[k] = quota;
-    identities[k] = { model: identity.model, family: identity.family };
+    // defineProperty, not assignment: assigning "__proto__" on a plain object
+    // would replace its prototype instead of adding the window.
+    defineOwn(windows, k, quota);
+    defineOwn(identities, k, { model: identity.model, family: identity.family });
   }
 }
 
@@ -946,7 +952,12 @@ export function normalizeQuotaSummary(
     if (parsedBuckets.length === 0) continue;
     const hasFiveHour = parsedBuckets.some((b) => b.cadence === "fiveHour");
     const hasWeekly = parsedBuckets.some((b) => b.cadence === "weekly");
-    const identity = resolveGroupIdentity(rawName, displayName, knownModels);
+    // A name or display name that is present but not a string cannot agree with
+    // the other field, so the group limits every Gemini model.
+    const malformedField = [group.name, group.displayName].some(
+      (v) => v !== undefined && v !== null && typeof v !== "string",
+    );
+    const identity = malformedField ? ALL_GEMINI_IDENTITY : resolveGroupIdentity(rawName, displayName, knownModels);
     parsedGroups.push({
       label: groupLabel,
       canonicalId,
