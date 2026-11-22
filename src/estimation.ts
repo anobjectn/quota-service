@@ -39,11 +39,10 @@ import type { Provider } from "./types";
 import type { UsageReport, ProviderReport } from "./present";
 import {
   ALL_GEMINI_IDENTITY,
-  NO_MODEL_IDENTITY,
   coerceModelIdentity,
   identityConstrainsModel,
-  mentionsOnlyPartnerFamily,
   modelIdIdentity,
+  poolTextIdentity,
   type ModelIdentity,
 } from "./model-identity";
 
@@ -255,7 +254,7 @@ function modelWindowIdentityLookup(extra: Record<string, unknown> | undefined): 
       const identity = modelIdIdentity(candidate);
       if (identity.model !== null) return identity;
     }
-    return mentionsOnlyPartnerFamily(`${recorded ?? ""} ${key}`) ? NO_MODEL_IDENTITY : ALL_GEMINI_IDENTITY;
+    return poolTextIdentity(`${recorded ?? ""} ${key}`);
   };
 }
 

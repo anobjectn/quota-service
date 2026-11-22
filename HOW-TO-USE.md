@@ -221,7 +221,13 @@ model ID: a per-model entry's `modelId` (effort suffixes such as `-high` are
 removed), or a `RetrieveUserQuotaSummary` group whose name or display name
 matches a model in the same server's `GetUserStatus` model list (for example
 the "Gemini 4 Argon" group). A partner pool ("Claude and GPT models") limits no
-Gemini model. Every other window limits every Gemini model, including the
+Gemini model. Image generation has its own scope: an image model ID
+(`imagen-*`, or an ID with an `image` segment such as
+`gemini-3-pro-image-preview`), or a pool whose name names only image generation
+("Image generation", "Imagen", "text-to-image"), limits image generation and no
+Gemini text model, so using up image quota never changes the text
+recommendation. A name that also names text, code, or agents ("Text and image
+generation") is not treated as image-only. Every other window limits every Gemini model, including the
 shared "Gemini Models" group and any group the server's model list does not
 name. This fails closed: an unrecognized pool that runs out makes every Gemini
 model look exhausted, and the Cloud Code fallback (which has no model list)

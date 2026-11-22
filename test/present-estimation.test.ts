@@ -338,6 +338,13 @@ test("per-model entries are identified only by their exact model ID", () => {
     { label: "Gemini 4 Argon", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
     { label: "Claude Opus 5.5", quotaInfo: { remainingFraction: 0 } },
   ]))).toBe("Gemini 4 Argon@90");
+  // Image-generation models and pools limit no Gemini text model.
+  expect(recommendFrom(normalizeModelConfigs([
+    { label: "Gemini 4 Argon", modelId: "gemini-4-argon", quotaInfo: { remainingFraction: 0.9 } },
+    { label: "Gemini 3 Pro Image", modelId: "gemini-3-pro-image-preview", quotaInfo: { remainingFraction: 0 } },
+    { label: "Imagen 4", modelId: "imagen-4.0-generate-001", quotaInfo: { remainingFraction: 0 } },
+    { label: "Image generation", quotaInfo: { remainingFraction: 0 } },
+  ]))).toBe("Gemini 4 Argon@90");
 
   // Non-Antigravity provider (Anthropic) with only modelWindows keeps null provider headroom.
   const anthUsage: UsageReport = {
@@ -396,6 +403,25 @@ test("a summary group is model-specific only when the server's model list names 
       .toBe("Gemini 4 Argon@90");
   }
 
+  // An image-generation pool, or a group named by image model IDs, limits no
+  // Gemini text model and never takes the shared slots.
+  for (const group of [
+    { displayName: "Image generation" },
+    { displayName: "Gemini image generation" },
+    { displayName: "Imagen" },
+    { name: "imagen-4.0-generate-001" },
+    { name: "gemini-3-pro-image-preview" },
+  ]) {
+    const snapshot = summary({ ...group, buckets: [{ bucketId: "image-daily", displayName: "Daily", remainingFraction: 0 }] });
+    expect(recommendFrom(snapshot)).toBe("Gemini 4 Argon@90");
+    expect(Object.values(snapshot?.extra?.modelWindowIdentity as Record<string, unknown>)).toContainEqual(
+      expect.objectContaining({ family: "image" }),
+    );
+  }
+  const imageOnly = normalizeQuotaSummary({ groups: [{ displayName: "Image generation", buckets: [{ window: "weekly", remainingFraction: 0 }] }] as never }, null, undefined, KNOWN_MODELS);
+  expect(imageOnly?.weekly).toBeNull();
+  expect(Object.values(imageOnly?.modelWindows ?? {})).toEqual([expect.objectContaining({ usedPercent: 100 })]);
+
   // Everything else limits every Gemini model (fails closed): no model list,
   // names and display names that disagree, IDs or names the server does not
   // list, and every label-only way of naming a model.
@@ -408,7 +434,8 @@ test("a summary group is model-specific only when the server's model list names 
     summary({ displayName: "Gemini 4 Hydrogen", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
     summary({ displayName: "Gemini 4 Max", buckets: [{ displayName: "Max requests", remainingFraction: 0 }] }),
     summary({ displayName: "Google AI Ultra (Weekly)", buckets: [{ bucketId: "gemini-4-1", remainingFraction: 0 }] }),
-    summary({ displayName: "Image generation", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
+    summary({ displayName: "Text and image generation", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
+    summary({ name: "gemini-3-pro-image-preview", displayName: "Gemini 4 Argon", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
     summary({ displayName: "Partner models", buckets: [{ displayName: "Weekly", remainingFraction: 0 }] }),
   ];
   for (const snapshot of exhaustedEverywhere) {
@@ -512,6 +539,8 @@ test("recommendation reads saved snapshots that predate extra.modelWindowIdentit
   expect(recommendFrom(legacy({ "gemini-4-argon": { usedPercent: 100, resetsAt: null } }))).toBe("Gemini 3.8 Flash@90");
   // A partner-only key limits no Gemini model.
   expect(recommendFrom(legacy({ "Claude / GPT (weekly)": { usedPercent: 100, resetsAt: null } }))).toBe("Gemini 4 Argon@90");
+  // An image-generation key limits no Gemini text model.
+  expect(recommendFrom(legacy({ "Image generation (weekly)": { usedPercent: 100, resetsAt: null } }))).toBe("Gemini 4 Argon@90");
   // Any other key limits every Gemini model, whatever the recorded endpoint spelling.
   for (const endpoint of ["RetrieveUserQuotaSummary", "retrieveUserQuotaSummary", "fetchAvailableModels", undefined]) {
     expect(recommendFrom(legacy({ "Gemini 4 Argon": { usedPercent: 100, resetsAt: null } }, { endpoint }))).toEndWith("@0");

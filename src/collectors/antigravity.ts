@@ -12,10 +12,10 @@ import { join } from "node:path";
 import { finiteNumber, parseInstant } from "../lib/time";
 import {
   ALL_GEMINI_IDENTITY,
-  NO_MODEL_IDENTITY,
+  IMAGE_GENERATION_IDENTITY,
   canonicalModelId,
-  mentionsOnlyPartnerFamily,
   modelIdIdentity,
+  poolTextIdentity,
   type ModelIdentity,
 } from "../model-identity";
 import type { CollectorResult, WindowQuota, WindowSnapshot } from "../types";
@@ -654,9 +654,9 @@ function isCanonicalModelId(value: string | null): value is string {
 
 /** Only an all-Gemini group that names Gemini ("Gemini Models") can hold the
  * shared `fiveHour`/`weekly` slots; a group with both cadences outranks one
- * with a single cadence. Model-specific groups, partner pools, and unnamed or
- * unrecognized groups ("Image generation") stay in `modelWindows`, where they
- * still limit every Gemini model. */
+ * with a single cadence. Model-specific groups, partner and image-generation
+ * pools, and unnamed or unrecognized groups stay in `modelWindows`; the
+ * unrecognized ones there still limit every Gemini model. */
 function primaryGeminiGroupScore(
   identity: ModelIdentity,
   texts: (string | null)[],
@@ -745,9 +745,11 @@ function normalizeDisplayName(value: string): string {
  * a listed model ID, or its display name is a listed model's display name
  * ("Gemini 4 Argon"), and when both are present they name the same model. A
  * name that is a model ID the server does not list ("gemini-4") also counts as
- * a disagreement. A partner pool ("Claude and GPT models") limits no Gemini
- * model. Every other group is a Gemini quota of unknown scope and limits every
- * Gemini model. Labels are never parsed for model names. */
+ * a disagreement. A group named only by image model IDs, or a pool whose name
+ * names only image generation ("Image generation"), limits only image
+ * generation. A partner pool ("Claude and GPT models") limits no Gemini model.
+ * Every other group is a Gemini quota of unknown scope and limits every Gemini
+ * model. Labels are never parsed for model names. */
 function resolveGroupIdentity(
   rawName: string | null,
   displayName: string | null,
@@ -763,9 +765,10 @@ function resolveGroupIdentity(
   if (ids.length > 0 && ids.every((id) => id === ids[0]) && knownModels.some((m) => m.id === ids[0])) {
     return modelIdIdentity(ids[0]);
   }
-  if (ids.every((id) => !id.startsWith("gemini-")) && mentionsOnlyPartnerFamily(`${rawName ?? ""} ${displayName ?? ""}`)) {
-    return NO_MODEL_IDENTITY;
+  if (ids.length > 0 && ids.every((id) => modelIdIdentity(id).family === IMAGE_GENERATION_IDENTITY.family)) {
+    return IMAGE_GENERATION_IDENTITY;
   }
+  if (ids.every((id) => !id.startsWith("gemini-"))) return poolTextIdentity(`${rawName ?? ""} ${displayName ?? ""}`);
   return ALL_GEMINI_IDENTITY;
 }
 
@@ -1178,14 +1181,10 @@ function normalizeModelEntries(
         : entry.label;
     // Only the exact model ID identifies the model; the display label is never
     // parsed. An entry without a model ID is a Gemini quota of unknown scope
-    // (unless it names only a partner model), so it limits every Gemini model.
+    // (unless it names only a partner model or only image generation), so it
+    // limits every Gemini model.
     const fromId = modelIdIdentity(entry.modelId);
-    const identity =
-      fromId.model !== null
-        ? fromId
-        : mentionsOnlyPartnerFamily(entry.label)
-          ? NO_MODEL_IDENTITY
-          : ALL_GEMINI_IDENTITY;
+    const identity = fromId.model !== null ? fromId : poolTextIdentity(entry.label);
     const existing = modelWindows[key];
     insertModelWindow(modelWindows, key, entry.quota);
     if (!existing || entry.quota.usedPercent > existing.usedPercent) {
