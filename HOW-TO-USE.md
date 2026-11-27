@@ -23,9 +23,9 @@ know whether what you're looking at is current.
 ## Provider selection
 
 `QUOTA_PROVIDERS` is an ordered, comma-separated list containing `codex`,
-`anthropic`, `warp`, and/or `antigravity`. When it is unset, the service enables
+`anthropic`, `antigravity`, and/or `warp`. When it is unset, the service enables
 `codex,anthropic`; Warp and Antigravity are supported and opt-in. Copy `.env.example` to `.env`
-and add `warp` or `antigravity` when this machine should collect them:
+and add `antigravity` or `warp` when this machine should collect them:
 
 ```dotenv
 QUOTA_PROVIDERS=codex,anthropic,antigravity

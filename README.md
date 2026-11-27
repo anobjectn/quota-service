@@ -38,10 +38,10 @@ cp .env.example .env
 bun run quota
 ```
 
-The default providers are `codex,anthropic`. To include Warp and/or Antigravity, edit `.env`:
+The default providers are `codex,anthropic`. To include Antigravity and/or Warp, edit `.env`:
 
 ```dotenv
-QUOTA_PROVIDERS=codex,anthropic,warp,antigravity
+QUOTA_PROVIDERS=codex,anthropic,antigravity,warp
 QUOTA_PORT=8787
 QUOTA_RETENTION_DAYS=forever
 ```

@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Provider } from "./types";
 
-export const ALL_PROVIDERS = ["codex", "anthropic", "warp", "antigravity"] as const satisfies readonly Provider[];
+export const ALL_PROVIDERS = ["codex", "anthropic", "antigravity", "warp"] as const satisfies readonly Provider[];
 export const DEFAULT_PROVIDERS = ["codex", "anthropic"] as const satisfies readonly Provider[];
 
 const REPO_ENV_PATH = join(import.meta.dir, "..", ".env");
@@ -47,7 +47,7 @@ export function parseEnabledProviders(raw: string | undefined): Provider[] {
   for (const value of values) {
     if (!isProvider(value)) {
       throw new Error(
-        `Invalid QUOTA_PROVIDERS: unknown provider "${value}"; expected codex, anthropic, warp, or antigravity`,
+        `Invalid QUOTA_PROVIDERS: unknown provider "${value}"; expected codex, anthropic, antigravity, or warp`,
       );
     }
     if (seen.has(value)) {
